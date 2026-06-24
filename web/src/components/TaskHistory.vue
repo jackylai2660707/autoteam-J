@@ -27,10 +27,12 @@
             <td class="px-4 py-3 font-mono text-xs text-gray-400">{{ task.task_id }}</td>
             <td class="px-4 py-3">
               <span class="px-2 py-0.5 bg-gray-800 rounded text-xs font-medium text-gray-300">
-                {{ task.command }}
+                {{ commandLabel(task.command) }}
               </span>
             </td>
-            <td class="px-4 py-3 text-xs text-gray-400">{{ formatParams(task.params) }}</td>
+            <td class="px-4 py-3 text-xs text-gray-400" :title="formatParams(task.params)">
+              {{ formatParams(task.params) }}
+            </td>
             <td class="px-4 py-3">
               <span class="inline-flex items-center gap-1.5 text-xs font-medium" :class="taskStatusClass(task.status)">
                 <span v-if="task.status === 'running'" class="animate-spin inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full"></span>
@@ -40,7 +42,7 @@
             </td>
             <td class="px-4 py-3 text-xs text-gray-400">{{ formatTime(task.created_at) }}</td>
             <td class="px-4 py-3 text-xs text-gray-400">{{ duration(task) }}</td>
-            <td class="px-4 py-3 text-xs max-w-xs truncate" :class="task.error ? 'text-red-400' : 'text-gray-400'">
+            <td class="px-4 py-3 text-xs max-w-lg truncate" :class="task.error ? 'text-red-400' : 'text-gray-400'" :title="task.error || formatResult(task.result)">
               {{ task.error || formatResult(task.result) }}
             </td>
           </tr>
@@ -94,12 +96,70 @@ function duration(task) {
 
 function formatParams(params) {
   if (!params || Object.keys(params).length === 0) return '-'
-  return Object.entries(params).map(([k, v]) => `${k}=${v}`).join(', ')
+  const labels = {
+    max_chatgpt_active: 'active保留',
+    target: 'active保留',
+    account_id: 'Team',
+    email: 'pending邮箱',
+    replace_with_pending_invite: '耗尽后消费pending',
+    trigger: '触发',
+  }
+  return Object.entries(params)
+    .filter(([_, v]) => v !== '' && v !== null && v !== undefined)
+    .map(([k, v]) => `${labels[k] || k}=${formatParamValue(k, v)}`)
+    .join(' · ') || '-'
+}
+
+function formatParamValue(key, value) {
+  if (key === 'replace_with_pending_invite') return value ? '开启' : '关闭'
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  return String(value)
+}
+
+function commandLabel(command) {
+  return {
+    'swap-seats': 'swap_seat',
+    'auto-swap-seats': '自动 swap_seat',
+    'auto-detect-replace': '自动检测替换',
+    'manage-teams': '多 Team 调度',
+    'consume-pending-invite': '消费 pending invite',
+    check: 'quota 检查',
+    rotate: 'swap_seat',
+  }[command] || command
+}
+
+function resultPartsFromSummary(result) {
+  const summary = result?.summary || {}
+  const parts = []
+  if (Array.isArray(result?.selected_emails)) {
+    parts.push(`选中 ${result.selected_emails.length} 个`)
+  }
+  if (Number.isFinite(summary.quota_available)) parts.push(`quota可用 ${summary.quota_available}`)
+  if (Number.isFinite(summary.seat_updated)) parts.push(`seat更新 ${summary.seat_updated}`)
+  if (Number.isFinite(summary.oauth_updated)) parts.push(`OAuth更新 ${summary.oauth_updated}`)
+  if (Number.isFinite(summary.seat_failed) && summary.seat_failed > 0) parts.push(`seat失败 ${summary.seat_failed}`)
+  if (Number.isFinite(summary.oauth_failed) && summary.oauth_failed > 0) parts.push(`OAuth失败 ${summary.oauth_failed}`)
+  return parts
 }
 
 function formatResult(result) {
   if (result === null || result === undefined) return '-'
   if (typeof result === 'string') return result
+  if (result.mode === 'multi_team_manage') {
+    return `Team成功 ${result.teams_ok || 0}/${result.teams_total || 0} · 失败 ${result.teams_failed || 0} · 耗尽后pending=${result.replace_with_pending_invite ? '开启' : '关闭'}`
+  }
+  if (result.mode === 'auto_detect_replace') {
+    return `${result.replaced ? '已替换' : '未替换'} · ${result.team || result.account_id || 'Team'} · ${result.reason || '-'}`
+  }
+  if (result.mode === 'consume_pending_invite') {
+    return `${result.invited ? '已消费pending' : '未消费pending'} · ${result.email || result.requested_email || '-'} · ${result.reason || '-'}`
+  }
+  if (result.mode === 'swap_seat') {
+    const parts = resultPartsFromSummary(result)
+    if (result.skipped) parts.unshift(`跳过:${result.reason || 'yes'}`)
+    if (result.team?.label || result.team?.account_id) parts.unshift(`Team=${result.team.label || result.team.account_id}`)
+    return parts.join(' · ') || JSON.stringify(result)
+  }
   return JSON.stringify(result)
 }
 </script>

@@ -1,135 +1,88 @@
 # Docker 部署
 
-## 快速开始
+Docker 模式同样运行 `swap_seat-only` WebUI/API。
+
+## 快速启动
 
 ```bash
-git clone https://github.com/cnitlrt/AutoTeam.git
-cd AutoTeam
-
+git clone https://github.com/jackylai2660707/autoteam-J.git
+cd autoteam-J
 mkdir -p data
 cp .env.example data/.env
-
-# 编辑 data/.env
 docker compose up -d
 ```
 
-常用命令：
-
-```bash
-docker compose logs -f
-docker compose restart
-docker compose down
-```
-
-## 数据持久化
-
-所有运行数据都存储在 `data/` 目录，通过 volume 挂载到容器：
-
-| 文件 / 目录 | 说明 |
-|-------------|------|
-| `data/.env` | 配置文件 |
-| `data/accounts.json` | 账号池状态 |
-| `data/state.json` | 管理员登录态 |
-| `data/auths/` | Codex 认证文件 |
-| `data/screenshots/` | 调试截图 |
-
-重建容器不会丢失这些数据。
-
-> 如果你使用了 `pull-cpa`，从 CPA 导入的认证文件也会落在 `data/auths/` 中。
-
-## 手动构建
-
-```bash
-docker build -t autoteam .
-docker run -d -p 8787:8787 -v $(pwd)/data:/app/data autoteam
-```
-
-## 配置方式
-
-### 方式一：预先编辑 `.env`
-
-启动前编辑 `data/.env`，容器启动后即可直接使用。
-
-### 方式二：Web 页面配置
-
-不预先配置直接启动，打开：
+打开：
 
 ```text
-http://host:8787
+http://<server>:8787
 ```
 
-浏览器中会显示配置向导页面，填写后自动验证连通性。
+## 数据目录
 
-## 宿主机服务访问
+`docker-compose.yml` 会把运行数据放在 `data/`。建议备份：
 
-如果你在 **Linux + Docker** 环境中，需要让容器访问宿主机上的代理、邮箱服务或远端同步服务，建议在 `docker-compose.yml` 中加入：
+| 文件 | 说明 |
+|---|---|
+| `data/.env` | 配置 |
+| `data/state.json` | 管理员 session/workspace |
+| `data/swap_seat_quota_state.json` | quota cache |
+| `data/swap_seat_cooldown.json` | swap 冷却 |
+| `data/accounts.json` | pending invite 注册状态兼容记录 |
 
-```yaml
-services:
-  autoteam:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+## 推荐配置
+
+编辑 `data/.env`：
+
+```dotenv
+API_KEY=change-me
+
+CPA_URL=http://host.docker.internal:8317
+CPA_KEY=your_cpa_key
+
+MAIL_PROVIDER=cloudflare_temp_email
+CF_TEMP_EMAIL_BASE_URL=https://tempmail.example.com
+CF_TEMP_EMAIL_ADMIN_PASSWORD=your_admin_password
+CF_TEMP_EMAIL_DOMAIN={random}.a.com;{random}.b.com
+
+AUTO_CHECK_TARGET_SEATS=2
+AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true
+TEAM_WORKSPACES_JSON=[]
 ```
 
-然后在 `data/.env` 里使用宿主机别名，例如：
+如果 CPA 跑在同一台宿主机，Linux 上可能需要在 compose 中配置 `extra_hosts` 或直接填写宿主机网关 IP。
 
-```env
-PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
-```
-
-说明：
-
-- **Linux Docker** 通常需要手动加上面的 `extra_hosts`
-- **Windows / macOS Docker Desktop** 一般自带 `host.docker.internal`
-- 如果你直接写宿主机局域网 / Tailscale IP，也要确保对应端口对容器可达
-
-## 容器中的文件权限
-
-容器以 root 运行，`docker-entrypoint.sh` 会把 `/app/data` 下的文件设为可写。
-
-如果你在宿主机上看到部分认证文件类似：
-- `nobody:nogroup`
-- `600`
-
-通常不影响容器内运行；如需宿主机直接查看，可手动调整权限。
-
-## 常见问题
-
-### 容器一直重启
-
-查看日志：
+## 更新
 
 ```bash
-docker compose logs
+git pull
+docker compose build
+docker compose up -d
 ```
 
-通常是：
-- 配置缺失
-- 邮箱服务 / 远端同步服务连通性验证失败
-
-### `data` 目录没有写权限
-
-容器入口会自动 `chmod -R 777 /app/data`。如果宿主机仍无法访问：
+## 查看日志
 
 ```bash
-sudo chmod -R 777 data/
+docker compose logs -f autoteam
 ```
 
-### 重建后配置丢失
+## Playwright 代理
 
-确保 `docker-compose.yml` 中有 volume 挂载：
+如需浏览器流量走代理：
 
-```yaml
-volumes:
-  - ./data:/app/data
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
+PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
 ```
 
-### 反向同步后 `data/auths` 里出现重复文件名风格
+带认证的 SOCKS5 不受 Chromium 支持；需要认证时建议使用 HTTP 代理：
 
-新版本会在同步时自动做去重，并统一为本地命名规范。若你怀疑历史版本留下了旧文件，执行一次：
-
-```bash
-uv run autoteam pull-cpa
+```dotenv
+PLAYWRIGHT_PROXY_URL=http://user:pass@host.docker.internal:1080
 ```
 
-即可重新整理。
+## 安全提醒
+
+- 不要把真实 `API_KEY`、`CPA_KEY`、管理员 session 提交到 git。
+- WebUI 只建议暴露在内网或反向代理鉴权后。
+- Docker 部署不改变安全边界：仍然不会 kick/remove/cancel invite，也不会创建 invite。

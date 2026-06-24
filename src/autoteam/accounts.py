@@ -101,6 +101,7 @@ def add_account(
             "password": password,
             **mail_fields,
             "status": STATUS_PENDING,
+            "seat_type": None,
             "auth_file": None,  # CPA 认证文件路径
             "quota_exhausted_at": None,  # 额度用完的时间
             "quota_resets_at": None,  # 额度恢复时间

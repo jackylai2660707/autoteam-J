@@ -359,84 +359,14 @@ def register_with_invite(
 
 
 def run():
-    mail_client = None
-    account_id = None
-    chatgpt = None
+    """兼容旧入口：不创建新 invite，只消费已有 pending invite。"""
+    from autoteam.manager import cmd_add
 
-    try:
-        # Step 1: 创建临时邮箱
-        mail_client = CloudMailClient()
-        mail_client.login()
-        account_id, email = mail_client.create_temp_email()
-        logger.info("[邀请] 临时邮箱: %s", email)
-
-        # Step 2: 发送 Team 邀请
-        chatgpt = ChatGPTTeamAPI()
-        chatgpt.start()
-        status, data = chatgpt.invite_member(email)
-
-        if status != 200:
-            logger.error("[邀请] 邀请失败 (HTTP %d)", status)
-            return False
-        logger.info("[邀请] 邀请已发送")
-
-        # Step 3: 等待邀请邮件
-        logger.info("[邀请] 等待邀请邮件...")
-        invite_link = None
-        try:
-            email_data = mail_client.wait_for_email(
-                to_email=email,
-                timeout=MAIL_TIMEOUT,
-                sender_keyword="openai",
-            )
-            invite_link = mail_client.extract_invite_link(email_data)
-        except TimeoutError:
-            logger.error("[邀请] 等待邀请邮件超时")
-        except Exception as e:
-            logger.error("[邀请] 获取邀请邮件失败: %s", e)
-
-        if not invite_link:
-            logger.error("[邀请] 未获取到邀请链接")
-            return False
-
-        logger.info("[邀请] 邀请链接: %s", invite_link)
-
-        # Step 4: 关闭 ChatGPT API 浏览器，开新浏览器做注册
-        chatgpt.stop()
-        chatgpt = None
-
-        logger.info("[邀请] 开始注册 ChatGPT 账号")
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(**get_playwright_launch_options())
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
-
-            result, pwd = register_with_invite(page, invite_link, email, mail_client)
-
-            screenshot(page, "final.png")
-            browser.close()
-
-        if result:
-            logger.info("[邀请] %s 已注册并加入 ChatGPT Team", email)
-        else:
-            logger.error("[邀请] 流程未完成，请查看 screenshots/ 目录")
-
-        return result
-
-    finally:
-        if chatgpt:
-            chatgpt.stop()
-        # 不删除临时邮箱，保留账号
-        if mail_client and account_id:
-            logger.info("[邀请] 临时邮箱保留: %s (accountId=%s)", email, account_id)
+    return bool((cmd_add() or {}).get("invited"))
 
 
 def main():
-    logger.info("ChatGPT Team 自动邀请 + 注册工具")
+    logger.info("ChatGPT Team 全员 quota 耗尽兜底邀请工具")
     result = run()
     sys.exit(0 if result else 1)
 

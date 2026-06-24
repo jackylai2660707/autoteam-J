@@ -1,224 +1,170 @@
 <template>
-  <div v-if="status">
-    <!-- 统计卡片 -->
-    <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
-      <div v-for="card in cards" :key="card.label"
-        class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+  <div class="space-y-6">
+    <div class="rounded-2xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-200">
+      <div class="font-medium text-blue-100">swap_seat 总览</div>
+      <div class="mt-1 text-blue-200/90">
+        这里只读展示多 Team、冷却、quota cache 和 CPA OAuth active/standby。不会登录成员账号、不会同步本地 auth、不会 kick/remove/cancel invite。
+      </div>
+    </div>
+
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 class="text-2xl font-bold text-white">运行总览</h2>
+        <p class="mt-1 text-sm text-gray-400">状态来自只读接口；执行 swap 或 pending invite 替换请到「Seat 调度」。</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button @click="emit('navigate', 'pool')" class="btn-primary px-4 py-2 text-sm">
+          去 Seat 调度
+        </button>
+        <button @click="emit('navigate', 'team')" class="btn-secondary px-4 py-2 text-sm">
+          Team 成员
+        </button>
+        <button @click="emit('navigate', 'config')" class="btn-secondary px-4 py-2 text-sm">
+          配置面板
+        </button>
+        <button @click="loadOverview" :disabled="overviewLoading" class="btn-secondary px-4 py-2 text-sm disabled:opacity-50">
+          {{ overviewLoading ? '刷新中...' : '刷新总览' }}
+        </button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
+      <div v-for="card in cards" :key="card.label" class="rounded-xl border border-gray-800 bg-gray-900 p-4">
         <div class="text-sm text-gray-400">{{ card.label }}</div>
-        <div class="text-3xl font-bold mt-1" :class="card.color">{{ card.value }}</div>
+        <div class="mt-1 text-3xl font-bold" :class="card.color">{{ card.value }}</div>
+        <div v-if="card.hint" class="mt-1 text-[11px] text-gray-500">{{ card.hint }}</div>
       </div>
     </div>
 
-    <!-- 账号表格 -->
-    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-        <h2 class="text-lg font-semibold text-white">账号列表</h2>
-        <div class="flex items-center gap-2">
-          <div v-if="selectedEmails.length" class="text-xs text-fuchsia-300">
-            已选 {{ selectedEmails.length }} 个
+    <div v-if="overviewError" class="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+      {{ overviewError }}
+    </div>
+
+    <div class="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+      <div class="rounded-2xl border border-white/10 bg-gray-900/70 p-4">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-semibold text-white">Team 健康状态</h3>
+            <p class="mt-1 text-xs text-gray-500">按 account_id 汇总冷却和 quota cache；disabled Team 不参与自动调度。</p>
           </div>
-          <button @click="bulkDisableSelected" :disabled="bulkDisableDisabled"
-            class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
-            :class="bulkDisableDisabled
-              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-              : 'bg-fuchsia-600/10 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-600/20'">
-            {{ bulkUpdating ? '批量处理中...' : `一键禁用${selectedDisableTargets.length ? `（${selectedDisableTargets.length}）` : ''}` }}
-          </button>
-          <button @click="bulkEnableSelected" :disabled="bulkEnableDisabled"
-            class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
-            :class="bulkEnableDisabled
-              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-              : 'bg-emerald-600/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-600/20'">
-            {{ bulkUpdating ? '批量处理中...' : `一键启用${selectedEnableTargets.length ? `（${selectedEnableTargets.length}）` : ''}` }}
-          </button>
-          <button @click="resetQuotaRecovery" :disabled="resetDisabled"
-            class="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50"
-            :class="resetDisabled
-              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-              : 'hover:text-white'">
-            {{ resetting ? '提交中...' : '重置额度恢复记录' }}
-          </button>
-          <button @click="syncAccounts" :disabled="syncDisabled"
-            class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-400 hover:text-white">
-            {{ syncing ? '同步中...' : '同步账号' }}
-          </button>
+          <span class="rounded bg-gray-800 px-2 py-1 text-xs text-gray-400">{{ enabledTeams.length }}/{{ teams.length }} enabled</span>
+        </div>
+
+        <div v-if="overviewLoading" class="h-40 animate-pulse rounded-xl bg-gray-800/70"></div>
+        <div v-else-if="teams.length" class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-800 text-left text-gray-500">
+                <th class="px-3 py-2 font-medium">Team</th>
+                <th class="px-3 py-2 font-medium">active</th>
+                <th class="px-3 py-2 font-medium">冷却</th>
+                <th class="px-3 py-2 font-medium">quota cache</th>
+                <th class="px-3 py-2 font-medium">pending invite</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="team in teams" :key="team.account_id || team.id" class="border-b border-gray-800/50">
+                <td class="px-3 py-3">
+                  <div class="max-w-[220px] truncate font-medium text-white">
+                    {{ team.label || team.workspace_name || team.account_id }}
+                  </div>
+                  <div class="mt-1 font-mono text-[11px] text-gray-500">{{ team.account_id }}</div>
+                  <div class="mt-1 flex flex-wrap gap-1 text-[11px]">
+                    <span class="rounded px-1.5 py-0.5" :class="team.enabled === false ? 'bg-gray-500/10 text-gray-400' : 'bg-emerald-500/10 text-emerald-300'">
+                      {{ team.enabled === false ? 'disabled' : 'enabled' }}
+                    </span>
+                    <span class="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">
+                      {{ team.session_present ? '独立 session' : '共享默认 session' }}
+                    </span>
+                  </div>
+                </td>
+                <td class="px-3 py-3 text-gray-300">{{ team.max_chatgpt_active || 2 }}</td>
+                <td class="px-3 py-3">
+                  <span class="rounded-full px-2 py-0.5 text-xs" :class="cooldownFor(team)?.allowed ? 'bg-emerald-500/10 text-emerald-300' : cooldownFor(team) ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-500/10 text-gray-400'">
+                    {{ cooldownLabel(team) }}
+                  </span>
+                </td>
+                <td class="px-3 py-3 text-xs text-gray-300">
+                  <div>可用 {{ quotaSummaryForTeam(team).available }} · 耗尽 {{ quotaSummaryForTeam(team).exhausted }}</div>
+                  <div class="mt-1 text-gray-500">待复查 {{ quotaSummaryForTeam(team).stale }}</div>
+                </td>
+                <td class="px-3 py-3 text-xs">
+                  <span v-if="team.pending_invite_email" class="rounded bg-amber-500/10 px-2 py-1 font-mono text-amber-300">
+                    {{ team.pending_invite_email }}
+                  </span>
+                  <span v-else class="text-gray-500">未指定</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="rounded-xl border border-dashed border-gray-700 px-4 py-8 text-center text-sm text-gray-500">
+          暂无 Team 配置。完成管理员登录后会回退当前 Team；多 Team 可在「配置面板 → 多 Team」设置。
         </div>
       </div>
-      <div v-if="message" class="mx-4 mt-4 px-4 py-3 rounded-lg text-sm border" :class="messageClass">
-        {{ message }}
-      </div>
-      <div v-if="!adminReady" class="mx-4 mt-4 px-4 py-3 rounded-lg text-sm border bg-amber-500/10 text-amber-300 border-amber-500/20">
-        请先在「配置面板」页完成管理员登录后，才能操作账号；“重置额度恢复记录”可单独使用。
-      </div>
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="text-gray-400 text-left border-b border-gray-800">
-              <th class="px-4 py-3 font-medium w-10">
-                <input
-                  type="checkbox"
-                  :checked="allSelectableSelected"
-                  :disabled="!selectableAccounts.length || actionDisabled"
-                  @change="toggleSelectAll($event.target.checked)"
-                  class="h-4 w-4 rounded border-gray-700 bg-gray-900 text-fuchsia-500 focus:ring-fuchsia-500 disabled:opacity-40">
-              </th>
-              <th class="px-4 py-3 font-medium">#</th>
-              <th class="px-4 py-3 font-medium">邮箱</th>
-              <th class="px-4 py-3 font-medium">状态</th>
-              <th class="px-4 py-3 font-medium text-right">5h 剩余</th>
-              <th class="px-4 py-3 font-medium text-right">周 剩余</th>
-              <th class="px-4 py-3 font-medium">5h 重置</th>
-              <th class="px-4 py-3 font-medium">周 重置</th>
-              <th class="px-4 py-3 font-medium text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(acc, i) in status.accounts" :key="acc.email"
-              class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
-              <td class="px-4 py-3">
-                <input
-                  type="checkbox"
-                  :checked="isSelected(acc.email)"
-                  :disabled="!isBulkSelectable(acc) || actionDisabled"
-                  @change="toggleAccountSelected(acc.email, $event.target.checked)"
-                  class="h-4 w-4 rounded border-gray-700 bg-gray-900 text-fuchsia-500 focus:ring-fuchsia-500 disabled:opacity-40">
-              </td>
-              <td class="px-4 py-3 text-gray-500">{{ i + 1 }}</td>
-              <td class="px-4 py-3 font-mono text-xs text-slate-200">{{ acc.email }}</td>
-              <td class="px-4 py-3">
-                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium"
-                  :class="statusClass(acc.status)">
-                  <span class="w-1.5 h-1.5 rounded-full" :class="dotClass(acc.status)"></span>
-                  {{ statusLabel(acc.status) }}
+
+      <div class="space-y-4">
+        <div class="rounded-2xl border border-white/10 bg-gray-900/70 p-4">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-sm font-semibold text-white">quota cache 最近记录</h3>
+              <p class="mt-1 text-xs text-gray-500">不会触发 CPA quota 检查；只展示本地缓存。</p>
+            </div>
+            <span class="rounded bg-gray-800 px-2 py-1 text-xs text-gray-400">{{ quotaEntries.length }} 条</span>
+          </div>
+          <div v-if="overviewLoading" class="h-24 animate-pulse rounded-xl bg-gray-800/70"></div>
+          <div v-else-if="quotaEntries.length" class="space-y-2">
+            <div v-for="entry in quotaEntries.slice(0, 6)" :key="entry.key" class="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="truncate font-mono text-xs text-slate-200">{{ entry.email || '-' }}</div>
+                  <div class="mt-1 truncate font-mono text-[11px] text-gray-500">{{ entry.account_id || 'default' }}</div>
+                </div>
+                <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px]" :class="quotaStateClass(entry)">
+                  {{ quotaStateLabel(entry) }}
                 </span>
-              </td>
-              <td class="px-4 py-3 text-right font-mono" :class="pctColor(quota(acc, 'primary'))">
-                {{ quotaPct(acc, 'primary') }}
-              </td>
-              <td class="px-4 py-3 text-right font-mono" :class="pctColor(quota(acc, 'weekly'))">
-                {{ quotaPct(acc, 'weekly') }}
-              </td>
-              <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'primary') }}</td>
-              <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'weekly') }}</td>
-              <td class="px-4 py-3 text-right space-x-2">
-                <button
-                  v-if="!acc.is_main_account && !acc.disabled && acc.raw_status !== 'active'"
-                  @click="loginAccount(acc.email)"
-                  :disabled="actionDisabled || actionEmail === acc.email"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
-                  :class="actionDisabled || actionEmail === acc.email
-                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                    : 'bg-blue-600/10 text-blue-400 border-blue-500/30 hover:bg-blue-600/20'">
-                  {{ actionEmail === acc.email && actionType === 'login' ? '登录中...' : '登录' }}
-                </button>
-                <button
-                  v-if="!acc.is_main_account && ['active', 'auth_pending', 'exhausted'].includes(acc.raw_status)"
-                  @click="kickAccount(acc.email)"
-                  :disabled="actionDisabled || actionEmail === acc.email"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
-                  :class="actionDisabled || actionEmail === acc.email
-                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                    : 'bg-amber-600/10 text-amber-400 border-amber-500/30 hover:bg-amber-600/20'">
-                  {{ actionEmail === acc.email && actionType === 'kick' ? '移出中...' : '移出' }}
-                </button>
-                <button
-                  v-if="acc.raw_status === 'active' || acc.is_main_account"
-                  @click="exportCodexAuth(acc.email)"
-                  :disabled="actionEmail === acc.email"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition bg-cyan-600/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-600/20">
-                  导出
-                </button>
-                <button
-                  v-if="!acc.is_main_account"
-                  @click="toggleAccountDisabled(acc)"
-                  :disabled="actionDisabled || actionEmail === acc.email"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
-                  :class="actionDisabled || actionEmail === acc.email
-                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                    : acc.disabled
-                      ? 'bg-emerald-600/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-600/20'
-                      : 'bg-fuchsia-600/10 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-600/20'">
-                  {{
-                    actionEmail === acc.email && actionType === (acc.disabled ? 'enable' : 'disable')
-                      ? (acc.disabled ? '启用中...' : '禁用中...')
-                      : (acc.disabled ? '启用' : '禁用')
-                  }}
-                </button>
-                <button
-                  v-if="!acc.is_main_account"
-                  @click="removeAccount(acc.email)"
-                  :disabled="actionDisabled || actionEmail === acc.email"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
-                  :class="actionDisabled || actionEmail === acc.email
-                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                    : 'bg-rose-600/10 text-rose-400 border-rose-500/30 hover:bg-rose-600/20'">
-                  {{ actionEmail === acc.email && actionType === 'delete' ? '删除中...' : '删除' }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400">
+                <span class="rounded bg-gray-800 px-2 py-1">5h {{ entry.primary_remaining }}%</span>
+                <span class="rounded bg-gray-800 px-2 py-1">weekly {{ entry.weekly_remaining }}%</span>
+                <span class="rounded bg-gray-800 px-2 py-1">下次 {{ formatTs(entry.next_check_at || entry.exhausted_until) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="rounded-xl border border-dashed border-gray-700 px-4 py-6 text-sm text-gray-500">
+            暂无 quota cache。第一次执行 swap_seat 后会记录刷新时间和 5h/weekly 剩余额度。
+          </div>
+        </div>
 
-      <!-- Codex 认证导出弹窗 -->
-      <div v-if="exportData" class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" @click.self="exportData = null">
-        <div class="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
-          <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-            <h3 class="text-white font-semibold">Codex CLI 认证文件</h3>
-            <button @click="exportData = null" class="text-gray-400 hover:text-white text-lg">&times;</button>
+        <div class="rounded-2xl border border-white/10 bg-gray-900/70 p-4">
+          <div class="mb-3">
+            <h3 class="text-sm font-semibold text-white">CPA OAuth active / standby</h3>
+            <p class="mt-1 text-xs text-gray-500">CPA 是 OAuth/auth 真相源；Dashboard 只读展示。</p>
           </div>
-          <div class="p-4 space-y-3 overflow-y-auto flex-1">
-            <div class="px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-300 space-y-2">
-              <div class="font-medium">使用步骤：</div>
-              <ol class="list-decimal list-inside space-y-1 text-xs text-amber-400/90">
-                <li>退出当前 Codex CLI 会话</li>
-                <li>删除旧文件：<code class="bg-gray-800 px-1 rounded">rm ~/.codex/auth.json</code></li>
-                <li>将下方内容保存到 <code class="bg-gray-800 px-1 rounded">~/.codex/auth.json</code>（Windows: <code class="bg-gray-800 px-1 rounded">%APPDATA%\codex\auth.json</code>）</li>
-                <li>重新启动 Codex CLI</li>
-              </ol>
-              <div class="text-xs text-amber-400/60">导出后 Codex CLI 直连 OpenAI，不走 CPA 代理，响应更快。</div>
-            </div>
-            <div class="relative">
-              <pre class="bg-gray-950 border border-gray-800 rounded-lg p-4 text-xs font-mono text-gray-300 overflow-x-auto whitespace-pre">{{ exportJson }}</pre>
-              <button @click="copyExport"
-                class="absolute top-2 right-2 px-2 py-1 rounded border text-xs transition"
-                :class="copied
-                  ? 'bg-green-600/20 text-green-400 border-green-500/30'
-                  : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border-gray-700'">
-                {{ copied ? '复制成功' : '复制' }}
-              </button>
-            </div>
+          <div v-if="cpaError" class="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            {{ cpaError }}
           </div>
-          <div class="px-4 py-3 border-t border-gray-800 flex justify-end gap-3">
-            <button @click="downloadExport"
-              class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition">
-              下载 auth.json
-            </button>
-            <button @click="exportData = null"
-              class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-sm text-gray-300 rounded-lg border border-gray-700 transition">
-              关闭
-            </button>
+          <div v-else class="grid grid-cols-2 gap-3">
+            <div class="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3">
+              <div class="text-xs text-emerald-200/80">active</div>
+              <div class="mt-1 text-2xl font-bold text-emerald-300">{{ cpaSummary.active }}</div>
+            </div>
+            <div class="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <div class="text-xs text-gray-400">standby</div>
+              <div class="mt-1 text-2xl font-bold text-gray-200">{{ cpaSummary.standby }}</div>
+            </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
-
-  <!-- Loading skeleton -->
-  <div v-else-if="loading" class="space-y-4">
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
-      <div v-for="i in 4" :key="i" class="bg-gray-900 border border-gray-800 rounded-xl p-4 h-20 animate-pulse"></div>
-    </div>
-    <div class="bg-gray-900 border border-gray-800 rounded-xl h-64 animate-pulse"></div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
 
 const props = defineProps({
-  status: Object,
   loading: Boolean,
   runningTask: Object,
   adminStatus: {
@@ -226,371 +172,134 @@ const props = defineProps({
     default: null,
   },
 })
-const emit = defineEmits(['refresh', 'task-started'])
+const emit = defineEmits(['refresh', 'task-started', 'navigate'])
 
-const actionEmail = ref('')
-const actionType = ref('')
-const syncing = ref(false)
-const resetting = ref(false)
-const bulkUpdating = ref(false)
-const message = ref('')
-const exportData = ref(null)
-const copied = ref(false)
-const messageClass = ref('')
-const selectedEmails = ref([])
-const adminReady = computed(() => !!props.adminStatus?.configured)
-const actionDisabled = computed(() => !!props.runningTask || !adminReady.value || bulkUpdating.value)
-const syncDisabled = computed(() => syncing.value || actionDisabled.value)
-const resetDisabled = computed(() => resetting.value || !!props.runningTask)
-const selectableAccounts = computed(() => (props.status?.accounts || []).filter(isBulkSelectable))
-const selectedDisableTargets = computed(() => selectableAccounts.value.filter(acc => selectedEmails.value.includes(acc.email) && !acc.disabled))
-const selectedEnableTargets = computed(() => selectableAccounts.value.filter(acc => selectedEmails.value.includes(acc.email) && acc.disabled))
-const allSelectableSelected = computed(() => !!selectableAccounts.value.length && selectedEmails.value.length === selectableAccounts.value.length)
-const bulkDisableDisabled = computed(() => actionDisabled.value || !selectedDisableTargets.value.length)
-const bulkEnableDisabled = computed(() => actionDisabled.value || !selectedEnableTargets.value.length)
+const teams = ref([])
+const runtimeStatus = ref(null)
+const cpaAuths = ref([])
+const overviewLoading = ref(false)
+const overviewError = ref('')
+const cpaError = ref('')
+
+const enabledTeams = computed(() => teams.value.filter(team => team.enabled !== false))
+const runtimeTeams = computed(() => Array.isArray(runtimeStatus.value?.teams) ? runtimeStatus.value.teams : [])
+const quotaEntries = computed(() => runtimeStatus.value?.quota_cache?.entries || [])
+const quotaSummary = computed(() => runtimeStatus.value?.quota_cache?.summary || {})
+const cooldownByAccount = computed(() => {
+  const map = new Map()
+  for (const item of runtimeTeams.value) {
+    const accountId = String(item?.team?.account_id || item?.cooldown?.scope || '').trim()
+    if (accountId) map.set(accountId, item.cooldown || null)
+  }
+  return map
+})
+
+const codexAuths = computed(() => cpaAuths.value.filter(auth => {
+  const provider = String(auth.provider || auth.type || '').toLowerCase()
+  const email = String(auth.email || auth.account || '').trim()
+  return (!provider || provider === 'codex') && email
+}))
+
+const cpaSummary = computed(() => ({
+  active: codexAuths.value.filter(authActive).length,
+  standby: codexAuths.value.filter(auth => !authActive(auth)).length,
+}))
 
 const cards = computed(() => {
-  if (!props.status) return []
-  const s = props.status.summary
+  const cooldownBlocked = runtimeTeams.value.filter(item => item?.cooldown && !item.cooldown.allowed).length
   return [
-    { label: '活跃', value: s.active, color: 'text-green-400' },
-    { label: '待修复', value: s.auth_pending || 0, color: 'text-cyan-400' },
-    { label: '待命', value: s.standby, color: 'text-yellow-400' },
-    { label: '额度用完', value: s.exhausted, color: 'text-red-400' },
-    { label: '禁用', value: s.disabled || 0, color: 'text-fuchsia-400' },
-    { label: '总计', value: s.total, color: 'text-white' },
+    { label: 'Teams', value: enabledTeams.value.length, color: 'text-white', hint: `total ${teams.value.length}` },
+    { label: 'Quota 可用', value: quotaSummary.value.available || 0, color: 'text-emerald-400', hint: 'cache' },
+    { label: 'Quota 耗尽', value: quotaSummary.value.exhausted_cached || 0, color: 'text-amber-400', hint: 'blocked' },
+    { label: '待复查', value: quotaSummary.value.stale || 0, color: 'text-gray-300', hint: 'stale' },
+    { label: 'OAuth active', value: cpaSummary.value.active, color: 'text-cyan-400', hint: 'CPA' },
+    { label: '冷却中', value: cooldownBlocked, color: cooldownBlocked ? 'text-amber-400' : 'text-emerald-400', hint: 'Team' },
   ]
 })
 
-function statusClass(s) {
-  return {
-    active: 'bg-green-500/10 text-green-400',
-    auth_pending: 'bg-cyan-500/10 text-cyan-400',
-    exhausted: 'bg-red-500/10 text-red-400',
-    standby: 'bg-yellow-500/10 text-yellow-400',
-    disabled: 'bg-fuchsia-500/10 text-fuchsia-400',
-    pending: 'bg-gray-500/10 text-gray-400',
-  }[s] || 'bg-gray-500/10 text-gray-400'
+function authActive(auth) {
+  return !auth?.disabled && String(auth?.status || '').toLowerCase() === 'active'
 }
 
-function dotClass(s) {
-  return {
-    active: 'bg-green-400',
-    auth_pending: 'bg-cyan-400',
-    exhausted: 'bg-red-400',
-    standby: 'bg-yellow-400',
-    disabled: 'bg-fuchsia-400',
-    pending: 'bg-gray-400',
-  }[s] || 'bg-gray-400'
-}
+async function loadOverview() {
+  overviewLoading.value = true
+  overviewError.value = ''
+  cpaError.value = ''
+  try {
+    const [teamsResult, runtimeResult, cpaResult] = await Promise.allSettled([
+      api.getTeams(),
+      api.getSwapRuntimeStatus(),
+      api.getCpaFiles(),
+    ])
 
-function statusLabel(s) {
-  return {
-    active: 'Active',
-    auth_pending: 'Auth pending',
-    exhausted: 'Used up',
-    standby: 'Standby',
-    disabled: 'Disabled',
-    pending: 'Pending',
-  }[s] || s
-}
-
-function isBulkSelectable(acc) {
-  return !!acc && !acc.is_main_account
-}
-
-function isSelected(email) {
-  return selectedEmails.value.includes(email)
-}
-
-function toggleAccountSelected(email, checked) {
-  if (!email) return
-  if (checked) {
-    if (!selectedEmails.value.includes(email)) {
-      selectedEmails.value = [...selectedEmails.value, email]
+    if (teamsResult.status === 'fulfilled') {
+      teams.value = Array.isArray(teamsResult.value.teams) ? teamsResult.value.teams : []
+    } else {
+      teams.value = []
+      overviewError.value = teamsResult.reason?.message || '读取 Team 配置失败'
     }
-    return
+
+    if (runtimeResult.status === 'fulfilled') {
+      runtimeStatus.value = runtimeResult.value
+    } else {
+      runtimeStatus.value = null
+      overviewError.value = overviewError.value || runtimeResult.reason?.message || '读取 swap 运行状态失败'
+    }
+
+    if (cpaResult.status === 'fulfilled') {
+      const value = cpaResult.value
+      cpaAuths.value = Array.isArray(value) ? value : Array.isArray(value.files) ? value.files : []
+    } else {
+      cpaAuths.value = []
+      cpaError.value = cpaResult.reason?.message || 'CPA 未配置或读取失败'
+    }
+  } finally {
+    overviewLoading.value = false
   }
-  selectedEmails.value = selectedEmails.value.filter(item => item !== email)
 }
 
-function toggleSelectAll(checked) {
-  selectedEmails.value = checked ? selectableAccounts.value.map(acc => acc.email) : []
+function cooldownFor(team) {
+  const accountId = String(team?.account_id || '').trim()
+  return accountId ? cooldownByAccount.value.get(accountId) : null
 }
 
-watch(
-  () => props.status?.accounts,
-  (accounts) => {
-    const allowed = new Set((accounts || []).filter(isBulkSelectable).map(acc => acc.email))
-    selectedEmails.value = selectedEmails.value.filter(email => allowed.has(email))
-  },
-  { immediate: true },
-)
-
-function quota(acc, type) {
-  const qi = props.status?.quota_cache?.[acc.email] || acc.last_quota
-  if (!qi) return null
-  const pct = type === 'primary' ? qi.primary_pct : qi.weekly_pct
-  return 100 - (pct || 0)
+function cooldownLabel(team) {
+  const cooldown = cooldownFor(team)
+  if (!cooldown) return '未记录'
+  if (cooldown.allowed) return `可 swap ${cooldown.used_today || 0}/${cooldown.daily_limit || 3}`
+  return `冷却中 ${formatTs(cooldown.next_allowed_at)}`
 }
 
-function quotaPct(acc, type) {
-  const val = quota(acc, type)
-  return val !== null ? `${val}%` : '-'
+function quotaSummaryForTeam(team) {
+  const accountId = String(team?.account_id || '').trim()
+  const entries = quotaEntries.value.filter(entry => String(entry.account_id || '').trim() === accountId)
+  return {
+    available: entries.filter(entry => entry.quota_available).length,
+    exhausted: entries.filter(entry => entry.cache_state === 'blocked_until_reset').length,
+    stale: entries.filter(entry => entry.cache_state === 'stale').length,
+  }
 }
 
-function quotaReset(acc, type) {
-  const qi = props.status?.quota_cache?.[acc.email] || acc.last_quota
-  if (!qi) return '-'
-  const ts = type === 'primary' ? qi.primary_resets_at : qi.weekly_resets_at
-  if (!ts) return '-'
-  const d = new Date(ts * 1000)
+function formatTs(ts) {
+  const value = Number(ts || 0)
+  if (!value) return '-'
+  const d = new Date(value * 1000)
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-function pctColor(val) {
-  if (val === null) return 'text-gray-500'
-  if (val > 30) return 'text-green-400'
-  if (val > 0) return 'text-yellow-400'
-  return 'text-red-400'
+function quotaStateLabel(entry) {
+  if (entry.cache_state === 'blocked_until_reset') return `耗尽:${entry.window || 'reset'}`
+  if (entry.cache_state === 'recent_ok') return '近期可用'
+  if (entry.cache_state === 'stale') return '待复查'
+  return entry.status || '-'
 }
 
-const exportJson = computed(() => {
-  if (!exportData.value) return ''
-  return JSON.stringify(exportData.value.codex_auth, null, 2)
-})
-
-async function exportCodexAuth(email) {
-  try {
-    exportData.value = await api.getCodexAuth(email)
-    copied.value = false
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-    setTimeout(() => { message.value = '' }, 8000)
-  }
+function quotaStateClass(entry) {
+  if (entry.cache_state === 'blocked_until_reset') return 'bg-amber-500/10 text-amber-300'
+  if (entry.cache_state === 'recent_ok') return 'bg-emerald-500/10 text-emerald-300'
+  if (entry.cache_state === 'stale') return 'bg-gray-500/10 text-gray-300'
+  return entry.quota_available ? 'bg-emerald-500/10 text-emerald-300' : 'bg-gray-500/10 text-gray-300'
 }
 
-async function copyExport() {
-  try {
-    await navigator.clipboard.writeText(exportJson.value)
-  } catch {
-    // HTTP 下 clipboard API 不可用，用 textarea fallback
-    const ta = document.createElement('textarea')
-    ta.value = exportJson.value
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-  }
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 3000)
-}
-
-function downloadExport() {
-  const blob = new Blob([exportJson.value], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'auth.json'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-async function syncAccounts() {
-  if (syncDisabled.value) return
-
-  syncing.value = true
-  message.value = ''
-  try {
-    const result = await api.postSyncAccounts()
-    message.value = result.message || '同步完成'
-    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    syncing.value = false
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function resetQuotaRecovery() {
-  if (resetDisabled.value) return
-
-  const ok = window.confirm(
-    '确认清空所有托管非主号账号的本地额度恢复记录吗？\n\n这会清空 last_quota / quota_resets_at / quota_exhausted_at，并把 exhausted 账号恢复为可检查状态。\n不会自动执行轮转或检查。'
-  )
-  if (!ok) return
-
-  resetting.value = true
-  message.value = ''
-  try {
-    const result = await api.startResetQuota()
-    message.value = `任务已提交: ${result.task_id}`
-    messageClass.value = 'bg-blue-500/10 text-blue-400 border-blue-500/20'
-    emit('task-started')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    resetting.value = false
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function loginAccount(email) {
-  if (actionDisabled.value) return
-
-  actionEmail.value = email
-  actionType.value = 'login'
-  message.value = ''
-  try {
-    const result = await api.loginAccount(email)
-    message.value = `已提交 ${email} 的登录任务: ${result.task_id}`
-    messageClass.value = 'bg-blue-500/10 text-blue-400 border-blue-500/20'
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    actionEmail.value = ''
-    actionType.value = ''
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function kickAccount(email) {
-  if (actionDisabled.value) return
-
-  const ok = window.confirm(`确认将 ${email} 移出 Team？\n账号会变为 standby 状态，额度恢复后可重新复用。`)
-  if (!ok) return
-
-  actionEmail.value = email
-  actionType.value = 'kick'
-  message.value = ''
-  try {
-    const result = await api.kickAccount(email)
-    message.value = result.message || `已将 ${email} 移出 Team`
-    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    actionEmail.value = ''
-    actionType.value = ''
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function toggleAccountDisabled(acc) {
-  if (actionDisabled.value) return
-
-  const disabling = !acc.disabled
-  const ok = window.confirm(
-    disabling
-      ? `确认禁用账号 ${acc.email}？\n禁用后自动巡检、轮转和远端同步都会跳过该账号。`
-      : `确认启用账号 ${acc.email}？\n启用后该账号会重新参与自动巡检、轮转和远端同步。`
-  )
-  if (!ok) return
-
-  actionEmail.value = acc.email
-  actionType.value = disabling ? 'disable' : 'enable'
-  message.value = ''
-  try {
-    const result = disabling
-      ? await api.disableAccount(acc.email)
-      : await api.enableAccount(acc.email)
-    message.value = result.message || `${disabling ? '已禁用' : '已启用'} ${acc.email}`
-    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    actionEmail.value = ''
-    actionType.value = ''
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function bulkDisableSelected() {
-  if (bulkDisableDisabled.value) return
-
-  const emails = selectedDisableTargets.value.map(acc => acc.email)
-  const ok = window.confirm(
-    `确认批量禁用这 ${emails.length} 个账号吗？\n禁用后自动巡检、轮转和远端同步都会跳过它们。`
-  )
-  if (!ok) return
-
-  bulkUpdating.value = true
-  message.value = ''
-  try {
-    const result = await api.bulkDisableAccounts(emails)
-    message.value = result.message || `已禁用 ${emails.length} 个账号`
-    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
-    selectedEmails.value = []
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    bulkUpdating.value = false
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function bulkEnableSelected() {
-  if (bulkEnableDisabled.value) return
-
-  const emails = selectedEnableTargets.value.map(acc => acc.email)
-  const ok = window.confirm(
-    `确认批量启用这 ${emails.length} 个账号吗？\n启用后它们会重新参与自动巡检、轮转和远端同步。`
-  )
-  if (!ok) return
-
-  bulkUpdating.value = true
-  message.value = ''
-  try {
-    const result = await api.bulkEnableAccounts(emails)
-    message.value = result.message || `已启用 ${emails.length} 个账号`
-    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
-    selectedEmails.value = []
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    bulkUpdating.value = false
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
-
-async function removeAccount(email) {
-  if (actionDisabled.value) return
-
-  const ok = window.confirm(`确认删除账号 ${email}？\n这会同时清理本地记录、已配置远端、Team/Invite 和 CloudMail。`)
-  if (!ok) return
-
-  actionEmail.value = email
-  actionType.value = 'delete'
-  message.value = ''
-  try {
-    const result = await api.deleteAccount(email)
-    message.value = result.message || `已删除 ${email}`
-    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
-    emit('refresh')
-  } catch (e) {
-    message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
-  } finally {
-    actionEmail.value = ''
-    actionType.value = ''
-    setTimeout(() => { message.value = '' }, 8000)
-  }
-}
+onMounted(loadOverview)
 </script>

@@ -60,7 +60,7 @@ CLOUDMAIL_PASSWORD = os.environ.get("CLOUDMAIL_PASSWORD", "")
 CLOUDMAIL_DOMAIN = os.environ.get("CLOUDMAIL_DOMAIN", "")
 
 # 邮箱提供者配置
-MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "cloudmail").strip().lower() or "cloudmail"
+MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "cloudflare_temp_email").strip().lower() or "cloudflare_temp_email"
 MAIL_SERVICES_JSON = os.environ.get("MAIL_SERVICES_JSON", "")
 MAIL_SERVICE_DEFAULT = os.environ.get("MAIL_SERVICE_DEFAULT", "").strip()
 
@@ -71,6 +71,7 @@ CF_TEMP_EMAIL_DOMAIN = os.environ.get("CF_TEMP_EMAIL_DOMAIN", "")
 
 # ChatGPT Team 配置
 CHATGPT_ACCOUNT_ID = os.environ.get("CHATGPT_ACCOUNT_ID", "")
+TEAM_WORKSPACES_JSON = os.environ.get("TEAM_WORKSPACES_JSON", "")
 
 # CPA (CLIProxyAPI) 配置
 CPA_URL = os.environ.get("CPA_URL", "")
@@ -100,11 +101,15 @@ API_KEY = os.environ.get("API_KEY", "")
 
 # 自动巡检配置
 AUTO_CHECK_INTERVAL = _get_int_env("AUTO_CHECK_INTERVAL", 300)  # 巡检间隔（秒），默认 5 分钟
-AUTO_CHECK_TARGET_SEATS = _get_int_env("AUTO_CHECK_TARGET_SEATS", 5)  # 自动巡检目标 Team seat 数
+AUTO_CHECK_TARGET_SEATS = _get_int_env("AUTO_CHECK_TARGET_SEATS", 2)  # swap_seat 保留的 ChatGPT/OAuth active 数（1~5）
 AUTO_CHECK_THRESHOLD = _get_int_env("AUTO_CHECK_THRESHOLD", 10)  # 额度低于此百分比触发轮转，默认 10%
 AUTO_CHECK_MIN_LOW = _get_int_env("AUTO_CHECK_MIN_LOW", 2)  # 至少几个账号低于阈值才触发，默认 2
 AUTO_CHECK_RETRY_ADD_PHONE = _get_bool_env("AUTO_CHECK_RETRY_ADD_PHONE", True)  # 是否自动重试 add_phone
 AUTO_CHECK_ADD_PHONE_MAX_RETRIES = _get_int_env("AUTO_CHECK_ADD_PHONE_MAX_RETRIES", 3)  # add_phone 最大自动重试次数
+AUTO_CHECK_REPLACE_WITH_PENDING_INVITE = _get_bool_env(
+    "AUTO_CHECK_REPLACE_WITH_PENDING_INVITE", False
+)  # quota 全耗尽时自动消费 pending invite 替换
+SWAP_SEAT_WHITELIST_EMAILS = _get_str_env("SWAP_SEAT_WHITELIST_EMAILS", "")  # 白名单：不查 quota、不切 seat、不启停 CPA OAuth
 
 # Playwright 代理配置
 PLAYWRIGHT_PROXY_URL = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()

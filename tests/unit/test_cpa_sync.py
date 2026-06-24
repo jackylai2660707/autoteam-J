@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from autoteam import cpa_sync
 
@@ -79,3 +80,53 @@ def test_sync_from_cpa_backfills_mail_service_binding(monkeypatch, tmp_path):
     assert result["accounts_added"] == 1
     assert saved["accounts"][0]["mail_service_id"] == "cm-1"
     assert saved["accounts"][0]["mail_provider"] == "cloudmail"
+
+
+def test_sync_from_cpa_accepts_userscript_export_and_preserves_pat_headers(monkeypatch, tmp_path):
+    auth_dir = tmp_path / "auths"
+    auth_dir.mkdir()
+
+    userscript_export = {
+        "access_token": "chatgpt-session-access-token",
+        "account_id": "acc-1",
+        "disabled": False,
+        "email": "user@example.com",
+        "expired": "2099-01-01T00:00:00+08:00",
+        "headers": {"authorization": "Bearer codex-personal-access-token"},
+        "id_token": None,
+        "last_refresh": "2026-06-24T12:00:00+08:00",
+        "refresh_token": None,
+        "type": "codex",
+        "websockets": True,
+    }
+
+    monkeypatch.setattr(cpa_sync, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(cpa_sync, "ensure_auth_dir", lambda: auth_dir)
+    monkeypatch.setattr(cpa_sync, "ensure_auth_file_permissions", lambda _path: None)
+    monkeypatch.setattr(cpa_sync, "_cleanup_local_duplicates", lambda accounts: (0, False))
+    monkeypatch.setattr(
+        cpa_sync,
+        "list_cpa_files",
+        # userscript 下载名通常是 email.json，不一定是旧的 codex-*.json。
+        lambda: [{"name": "user@example.com.json", "email": "user@example.com", "type": "codex"}],
+    )
+    monkeypatch.setattr(cpa_sync, "download_from_cpa", lambda _name: json.dumps(userscript_export))
+    monkeypatch.setattr(cpa_sync, "delete_from_cpa", lambda _name: True)
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
+    saved = {}
+    monkeypatch.setattr(
+        "autoteam.accounts.save_accounts",
+        lambda items: saved.setdefault("accounts", [dict(item) for item in items]),
+    )
+    monkeypatch.setattr("autoteam.mail_provider.infer_mail_service_from_email", lambda _email: "")
+    monkeypatch.setattr("autoteam.mail_provider.infer_mail_provider_from_email", lambda _email: "")
+
+    result = cpa_sync.sync_from_cpa()
+
+    assert result["accounts_added"] == 1
+    auth_file = Path(saved["accounts"][0]["auth_file"])
+    data = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert data["headers"]["authorization"] == "Bearer codex-personal-access-token"
+    assert data["refresh_token"] is None
+    assert data["id_token"] is None
+    assert data["websockets"] is True

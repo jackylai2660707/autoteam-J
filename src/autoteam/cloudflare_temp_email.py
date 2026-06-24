@@ -6,6 +6,7 @@ import html
 import json
 import logging
 import re
+import secrets
 import time
 import uuid
 from email import policy
@@ -32,6 +33,46 @@ _VERIFICATION_CODE_PATTERNS = (
     r"(?:temporary\s+(?:openai|chatgpt)\s+login\s+code(?:\s+is)?|verification\s+code(?:\s+is)?|login\s+code(?:\s+is)?|code(?:\s+is)?|验证码(?:为|是)?)\D{0,24}(\d{6})",
     r"\b(\d{6})\b",
 )
+
+
+def parse_cloudflare_temp_email_domain_options(value: str):
+    """解析 Cloudflare Temp Email 域名配置。
+
+    兼容：
+    - `a.com`
+    - `*.a.com` / `{random}.a.com`
+    - `xxxxx.a.com`（把连续 x 视为随机子域名前缀占位）
+    - `xxxxx.a.com ; xxxx.b.com` 多域名随机选择
+    """
+    parts = [part.strip().lower().lstrip("@") for part in re.split(r"[;\n,]+", str(value or "")) if part.strip()]
+    options = []
+    for item in parts:
+        enable_random = False
+        domain = item
+        if domain.startswith("*."):
+            enable_random = True
+            domain = domain[2:]
+        elif domain.startswith("{random}."):
+            enable_random = True
+            domain = domain[len("{random}.") :]
+        else:
+            match = re.match(r"^x{3,}\.(.+)$", domain, re.IGNORECASE)
+            if match:
+                enable_random = True
+                domain = match.group(1)
+
+        domain = domain.strip(".")
+        if not domain:
+            continue
+        options.append({"domain": domain, "enable_random_subdomain": enable_random})
+    return options
+
+
+def choose_cloudflare_temp_email_domain(value: str):
+    options = parse_cloudflare_temp_email_domain_options(value)
+    if not options:
+        return {"domain": str(value or "").strip().lower().lstrip("@"), "enable_random_subdomain": False}
+    return secrets.choice(options)
 
 
 def normalize_cloudflare_temp_email_base_url(base_url: str) -> str:
@@ -184,9 +225,14 @@ class CloudflareTempEmailClient:
             pass
         return None
 
-    def create_temp_email(self, prefix=None):
+    def create_temp_email(self, prefix=None, *, domain=None, enable_random_subdomain=None):
         if prefix is None:
             prefix = f"tmp-{uuid.uuid4().hex[:8]}"
+        selected_domain = choose_cloudflare_temp_email_domain(domain or self.domain)
+        request_domain = selected_domain["domain"]
+        random_subdomain = selected_domain["enable_random_subdomain"]
+        if enable_random_subdomain is not None:
+            random_subdomain = bool(enable_random_subdomain)
 
         payload = self._request(
             "POST",
@@ -194,9 +240,9 @@ class CloudflareTempEmailClient:
             label="创建邮箱",
             json={
                 "name": prefix,
-                "domain": self.domain,
+                "domain": request_domain,
                 "enablePrefix": False,
-                "enableRandomSubdomain": False,
+                "enableRandomSubdomain": random_subdomain,
             },
         )
         email = (payload.get("address") or "").strip()

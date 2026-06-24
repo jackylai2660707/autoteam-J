@@ -8,7 +8,7 @@
         </div>
         <div>
           <h1 class="text-lg font-semibold tracking-tight text-white">AutoTeam</h1>
-          <p class="mt-0.5 text-xs text-slate-400">账号轮转管理中心</p>
+          <p class="mt-0.5 text-xs text-slate-400">swap_seat 调度中心</p>
         </div>
       </div>
 
@@ -17,7 +17,7 @@
           <span class="inline-block h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.85)]"></span>
           面板在线
         </div>
-        <p class="mt-1 text-xs leading-5 text-slate-400">统一查看仪表盘、配置、同步、OAuth 和日志。</p>
+        <p class="mt-1 text-xs leading-5 text-slate-400">只做 CPA quota 检查、seat 收敛和 OAuth 启停。</p>
       </div>
     </div>
 
@@ -87,13 +87,11 @@ defineProps({
 defineEmits(['navigate', 'refresh', 'logout'])
 
 const items = [
-  { key: 'dashboard', icon: '📊', label: '仪表盘', mobileLabel: '仪表盘', hint: '概览账号池与状态' },
-  { key: 'config', icon: '🧩', label: '配置面板', mobileLabel: '配置', hint: '统一编辑系统配置' },
-  { key: 'team', icon: '👥', label: 'Team 成员', mobileLabel: '成员', hint: '查看与管理成员' },
-  { key: 'pool', icon: '🔁', label: '账号池操作', mobileLabel: '账号池', hint: '轮转、补位与清理' },
-  { key: 'sync', icon: '🔄', label: '同步中心', mobileLabel: '同步', hint: '同步本地、远端与状态' },
-  { key: 'oauth', icon: '🔐', label: 'OAuth 登录', mobileLabel: 'OAuth', hint: '手动接管 OAuth 流程' },
-  { key: 'tasks', icon: '📜', label: '任务历史', mobileLabel: '任务', hint: '追踪任务执行结果' },
+  { key: 'dashboard', icon: '📊', label: '总览', mobileLabel: '总览', hint: 'Team / quota / CPA 状态' },
+  { key: 'pool', icon: '🔁', label: 'Seat 调度', mobileLabel: '调度', hint: 'CPA quota 驱动 swap_seat' },
+  { key: 'team', icon: '👥', label: 'Team 成员', mobileLabel: '成员', hint: '只读查看成员 seat' },
+  { key: 'config', icon: '🧩', label: '配置面板', mobileLabel: '配置', hint: 'CPA / CFMail / 自动巡检' },
+  { key: 'tasks', icon: '📜', label: '任务历史', mobileLabel: '任务', hint: '追踪 swap 与 pending invite 注册' },
   { key: 'logs', icon: '📋', label: '日志', mobileLabel: '日志', hint: '查看实时运行日志' },
 ]
 </script>

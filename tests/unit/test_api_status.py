@@ -696,6 +696,7 @@ def test_get_auto_check_config_includes_target_seats(monkeypatch):
         {
             "interval": 300,
             "target_seats": 7,
+            "replace_with_pending_invite": True,
             "threshold": 10,
             "min_low": 2,
             "retry_add_phone": True,
@@ -705,7 +706,11 @@ def test_get_auto_check_config_includes_target_seats(monkeypatch):
 
     assert api.get_auto_check_config() == {
         "interval": 300,
-        "target_seats": 7,
+        "target_seats": 5,
+        "replace_with_pending_invite": True,
+        "max_chatgpt_active": 5,
+        "min_chatgpt_active": 1,
+        "max_allowed_chatgpt_active": 5,
         "threshold": 10,
         "min_low": 2,
         "retry_add_phone": True,
@@ -725,6 +730,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
         {
             "interval": 300,
             "target_seats": 5,
+            "replace_with_pending_invite": False,
             "threshold": 10,
             "min_low": 2,
             "retry_add_phone": True,
@@ -738,6 +744,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
         api.AutoCheckConfig(
             interval=420,
             target_seats=6,
+            replace_with_pending_invite=True,
             threshold=15,
             min_low=3,
             retry_add_phone=False,
@@ -747,7 +754,11 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
 
     assert result == {
         "interval": 420,
-        "target_seats": 6,
+        "target_seats": 5,
+        "replace_with_pending_invite": True,
+        "max_chatgpt_active": 5,
+        "min_chatgpt_active": 1,
+        "max_allowed_chatgpt_active": 5,
         "threshold": 15,
         "min_low": 3,
         "retry_add_phone": False,
@@ -755,7 +766,8 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     }
     assert written == {
         "AUTO_CHECK_INTERVAL": "420",
-        "AUTO_CHECK_TARGET_SEATS": "6",
+        "AUTO_CHECK_TARGET_SEATS": "5",
+        "AUTO_CHECK_REPLACE_WITH_PENDING_INVITE": "true",
         "AUTO_CHECK_THRESHOLD": "15",
         "AUTO_CHECK_MIN_LOW": "3",
         "AUTO_CHECK_RETRY_ADD_PHONE": "false",
@@ -764,7 +776,8 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     assert restart_event.is_set() is True
     assert sync_calls == ["synced"]
     assert os.environ["AUTO_CHECK_INTERVAL"] == "420"
-    assert os.environ["AUTO_CHECK_TARGET_SEATS"] == "6"
+    assert os.environ["AUTO_CHECK_TARGET_SEATS"] == "5"
+    assert os.environ["AUTO_CHECK_REPLACE_WITH_PENDING_INVITE"] == "true"
     assert os.environ["AUTO_CHECK_THRESHOLD"] == "15"
     assert os.environ["AUTO_CHECK_MIN_LOW"] == "3"
     assert os.environ["AUTO_CHECK_RETRY_ADD_PHONE"] == "false"

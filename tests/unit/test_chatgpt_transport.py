@@ -1,4 +1,5 @@
 from autoteam import chatgpt_api
+import pytest
 
 
 class _FakeTransport:
@@ -111,3 +112,29 @@ def test_direct_api_fetch_refreshes_access_token_before_retry(monkeypatch):
         "/api/auth/session",
         "/backend-api/accounts/acc-4/users",
     ]
+
+
+def test_team_api_guard_blocks_kick_invite_and_allows_seat_patch():
+    client = chatgpt_api.ChatGPTTeamAPI()
+
+    with pytest.raises(RuntimeError, match="kick/remove"):
+        client._assert_team_api_mutation_allowed("DELETE", "/backend-api/accounts/acc-1/users/user-1")
+
+    with pytest.raises(RuntimeError, match="invite"):
+        client._assert_team_api_mutation_allowed("POST", "/backend-api/accounts/acc-1/invites")
+
+    with pytest.raises(RuntimeError, match="invite"):
+        client._assert_team_api_mutation_allowed("PATCH", "/backend-api/accounts/acc-1/invites/inv-1")
+
+    client._assert_team_api_mutation_allowed("PATCH", "/backend-api/accounts/acc-1/users/user-1")
+
+
+def test_team_api_guard_blocks_invite_even_when_explicitly_enabled():
+    client = chatgpt_api.ChatGPTTeamAPI()
+    client.allow_team_invites = True
+
+    with pytest.raises(RuntimeError, match="pending invite"):
+        client._assert_team_api_mutation_allowed("POST", "/backend-api/accounts/acc-1/invites")
+
+    with pytest.raises(RuntimeError, match="invite"):
+        client._assert_team_api_mutation_allowed("PATCH", "/backend-api/accounts/acc-1/invites/inv-1")

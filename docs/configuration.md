@@ -1,264 +1,173 @@
 # 配置说明
 
-## `.env` 配置项
+当前 AutoTeam 只支持 `swap_seat-only` 主流程。配置重点是 CPA、CFMail、多 Team、白名单、管理员 session 和自动巡检。
 
-首次运行任何命令时会自动进入配置向导。现在启动阶段只强制要求 `API_KEY`，邮箱服务、CPA / Sub2API、代理等运行项也可以在登录后去配置面板补充。只有执行对应功能时，系统才会校验对应配置。也可以手动编辑：
+## 必填与推荐配置
 
-```bash
-cp .env.example .env
-```
+| 配置项 | 必填 | 说明 |
+|---|---:|---|
+| `API_KEY` | 推荐 | WebUI / API 鉴权；首次启动可自动生成 |
+| `CPA_URL` | 是 | CPA / CLIProxyAPI 地址 |
+| `CPA_KEY` | 是 | CPA 管理密钥 |
+| `MAIL_PROVIDER` | pending 替换时需要 | 推荐 `cloudflare_temp_email` |
+| `CF_TEMP_EMAIL_BASE_URL` | pending 替换时需要 | Cloudflare Temp Email API 根地址 |
+| `CF_TEMP_EMAIL_ADMIN_PASSWORD` | pending 替换时需要 | Cloudflare Temp Email 管理密码 |
+| `CF_TEMP_EMAIL_DOMAIN` | pending 替换时需要 | 邮箱域名，支持多域名与随机子域名 |
+| `TEAM_WORKSPACES_JSON` | 多 Team 时需要 | 多 Team 配置 JSON |
+| `SWAP_SEAT_WHITELIST_EMAILS` | 否 | 白名单，不查 quota、不切 seat、不启停 CPA OAuth |
+| `AUTO_CHECK_INTERVAL` | 否 | 自动巡检间隔，秒 |
+| `AUTO_CHECK_TARGET_SEATS` | 否 | 默认 ChatGPT/OAuth active 保留数，`1~5` |
+| `AUTO_CHECK_REPLACE_WITH_PENDING_INVITE` | 否 | Team 全员 quota 耗尽时是否消费 pending invite |
+| `SWAP_QUOTA_CHECK_MIN_INTERVAL_SECONDS` | 否 | 可用 quota 的最短重复检查间隔，默认 `900` |
 
-| 配置项 | 说明 | 何时需要 |
-|--------|------|------|
-| `MAIL_SERVICES_JSON` | 邮箱服务列表（内部 JSON） | 配置面板保存多邮箱服务时自动写入 |
-| `MAIL_SERVICE_DEFAULT` | 默认新建邮箱服务 ID | 使用多邮箱服务时自动写入 |
-| `MAIL_PROVIDER` | 当前默认邮箱服务类型（兼容旧配置） | 兼容旧脚本 / 旧 `.env` |
-| `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | CloudMail 服务项必填 |
-| `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | CloudMail 服务项必填 |
-| `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | CloudMail 服务项必填 |
-| `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | CloudMail 服务项必填 |
-| `CF_TEMP_EMAIL_BASE_URL` | Cloudflare Temp Email 后端 API 根地址 | Cloudflare Temp Email 服务项必填 |
-| `CF_TEMP_EMAIL_ADMIN_PASSWORD` | Cloudflare Temp Email 管理员密码 | Cloudflare Temp Email 服务项必填 |
-| `CF_TEMP_EMAIL_DOMAIN` | Cloudflare Temp Email 默认邮箱域名 | Cloudflare Temp Email 服务项必填 |
-| `SYNC_TARGET_CPA` | 是否启用 CPA 同步（`true/false`） | 否 |
-| `CPA_URL` | CPA（CLIProxyAPI）地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`） |
-| `CPA_KEY` | CPA 管理密钥 | 启用 CPA 时必填 |
-| `SYNC_TARGET_SUB2API` | 是否启用 Sub2API 同步（`true/false`） | 否 |
-| `SUB2API_URL` | Sub2API 地址 | 启用 Sub2API 时必填 |
-| `SUB2API_EMAIL` | Sub2API 管理员邮箱 | 启用 Sub2API 时必填 |
-| `SUB2API_PASSWORD` | Sub2API 管理员密码 | 启用 Sub2API 时必填 |
-| `SUB2API_GROUP` | Sub2API 分组名或分组 ID，多个用逗号分隔 | 启用 Sub2API 且希望自动加入分组时填写 |
-| `SUB2API_PROXY` | Sub2API 代理 ID 或名称 | 否；仅账号池同步新建账号时写入 `proxy_id` |
-| `SUB2API_CONCURRENCY` | Sub2API 新建账号默认并发数 | 否（默认 `10`） |
-| `SUB2API_PRIORITY` | Sub2API 新建账号默认优先级 | 否（默认 `1`） |
-| `SUB2API_RATE_MULTIPLIER` | Sub2API 新建账号默认倍率 | 否（默认 `1`） |
-| `SUB2API_AUTO_PAUSE_ON_EXPIRED` | Sub2API 额度到期后是否自动暂停 | 否（默认 `true`） |
-| `SUB2API_MODEL_WHITELIST` | Sub2API 模型白名单，多个用逗号分隔 | 否 |
-| `SUB2API_OPENAI_WS_MODE` | Sub2API OpenAI OAuth WS 模式（`off` / `ctx_pool` / `passthrough`） | 否（默认 `off`） |
-| `SUB2API_OPENAI_PASSTHROUGH` | Sub2API OpenAI passthrough（`true/false`） | 否（默认 `false`） |
-| `SUB2API_OVERWRITE_ACCOUNT_SETTINGS` | 同步时是否强制覆盖 AutoTeam 管理账号的默认设置 | 否（默认 `false`） |
-| `API_KEY` | Web 面板 / API 鉴权密钥 | 启动时必填（首次启动可自动生成） |
-| `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://host:port` 或 `http://user:pass@host:port` | 否 |
-| `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
-| `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
-| `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
-| `AUTO_CHECK_TARGET_SEATS` | 自动巡检目标 Team 总 seat 数 | 否（默认 `5`） |
-| `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
-| `AUTO_CHECK_RETRY_ADD_PHONE` | 是否自动重试 `add_phone`（手机号验证） | 否（默认 `true`） |
-| `AUTO_CHECK_ADD_PHONE_MAX_RETRIES` | `add_phone` 最大自动重试次数 | 否（默认 `3`） |
+## CPA
 
-> **2-seat 注意事项**
->
-> 当 `AUTO_CHECK_TARGET_SEATS=2` 时，为尽量实现无感切换，系统会优先尝试“先加新账号，再移出旧账号”。
-> 这会让 Team 在短时间内额外占用一个 seat，因此下个月账单可能比预期略高。
-> 如果你不希望出现这类额外占位，建议将主号的 `seat type` 改成 `codex`，同时保持总 seat 数仍为 `2`。
-
-## 配置面板分区
-
-登录 Web 面板后，配置面板已拆成独立分区：
-
-- **邮箱服务**
-- **远端同步**
-- **安全 / 访问控制**
-- **管理员 / 主号**
-- **巡检设置**
-- **源文件编辑**
-- **代理 / 高级**
-
-其中：
-
-- `API_KEY` 单独放在 **安全 / 访问控制**
-- 多个 CloudMail / Cloudflare Temp Email 服务项，以及默认新建服务选择放在 **邮箱服务**
-- CPA / Sub2API 开关、连接信息和 Sub2API 默认账号设置放在 **远端同步**
-- `.env` 原文编辑保留在 **源文件编辑**
-- 代理配置属于低频项，默认折叠
-- 当总 seat 数设为 `2` 时，「巡检设置」里会显示对应注意事项
-
-## 多邮箱服务说明
-
-AutoTeam 现在支持同时维护多个邮箱服务实例：
-
-- 可同时添加多个 `CloudMail`
-- 可同时添加多个 `Cloudflare Temp Email`
-- 必须指定一个**默认服务**，用于新建账号
-- 已有账号会优先使用：
-  1. 账号自身保存的 `mail_service_id`
-  2. 唯一邮箱域名匹配到的服务
-  3. 如果当前只配置了一个服务，也会自动回退到该服务
-- 如果存在多个候选服务且无法唯一确定，系统不会盲猜，会提示补充 `mail_service_id` 或修正域名配置
-
-> 兼容性说明：
->
-> - 旧版单服务 `.env` 仍然可用
-> - 配置面板保存后，会把默认服务镜像回 `MAIL_PROVIDER` 和对应的旧版 `CLOUDMAIL_*` / `CF_TEMP_EMAIL_*` 字段
-> - 非默认服务会保存在 `MAIL_SERVICES_JSON` 中
-
-## Sub2API 分组
-
-如果希望同步到 Sub2API 的账号自动加入指定分组，可以设置：
+CPA 是 OAuth/auth 真相源。AutoTeam 不再把本地 auth 当成主状态，也不再把本地 OAuth 主动同步回 CPA。
 
 ```dotenv
-SUB2API_GROUP=Team Pool
+CPA_URL=http://127.0.0.1:8317
+CPA_KEY=your_cpa_key
 ```
 
-也可以填写分组 ID，或多个分组：
+AutoTeam 会调用 CPA 完成：
+
+- list auth-files
+- check Codex quota
+- set auth disabled / active
+
+手动 API 只允许 disable；enable 只能由 swap_seat 自动决策。
+
+## Cloudflare Temp Email / CFMail
 
 ```dotenv
-SUB2API_GROUP=12,Team Pool
+MAIL_PROVIDER=cloudflare_temp_email
+CF_TEMP_EMAIL_BASE_URL=https://tempmail.example.com
+CF_TEMP_EMAIL_ADMIN_PASSWORD=your_admin_password
+CF_TEMP_EMAIL_DOMAIN={random}.a.com;{random}.b.com
 ```
 
-说明：
+`CF_TEMP_EMAIL_DOMAIN` 支持：
 
-- 支持 **分组名** 或 **分组 ID**
-- 多个分组用英文逗号分隔
-- 同步账号池账号时会自动带上这些分组
-- 同步主号 Codex 到 Sub2API 时也会自动带上这些分组
-- 更新时会保留账号原本手动绑定的其他分组，只替换 AutoTeam 自己管理的分组绑定
+| 写法 | 行为 |
+|---|---|
+| `a.com` | 固定域名 |
+| `*.a.com` | 随机子域名 |
+| `{random}.a.com` | 随机子域名 |
+| `xxxxx.a.com` | 连续 `x` 作为随机子域名占位 |
+| `xxxxx.a.com;xxxxx.b.com` | 多域名随机选择 |
 
-## Sub2API 默认账号设置
+CloudMail 配置仍保留兼容，但 pending invite 注册主路径推荐 Cloudflare Temp Email。
 
-AutoTeam 现在可以为 **新创建** 的 Sub2API OpenAI OAuth 账号自动写入默认参数：
+## 多邮箱服务
+
+WebUI 支持配置多个邮箱服务，并写入：
 
 ```dotenv
-SUB2API_PROXY=Residential Pool
-SUB2API_CONCURRENCY=10
-SUB2API_PRIORITY=1
-SUB2API_RATE_MULTIPLIER=1
-SUB2API_AUTO_PAUSE_ON_EXPIRED=true
-SUB2API_MODEL_WHITELIST=gpt-5.4,gpt-5.4-mini,gpt-5.3-codex
-SUB2API_OPENAI_WS_MODE=off
-SUB2API_OPENAI_PASSTHROUGH=false
-SUB2API_OVERWRITE_ACCOUNT_SETTINGS=false
+MAIL_SERVICES_JSON=[...]
+MAIL_SERVICE_DEFAULT=cf-1
 ```
 
-行为说明：
+pending invite 注册时会优先按邮箱域名匹配服务，匹配不到时使用默认服务。
 
-- **创建新账号时**：总是使用这些默认值；如果填写 `SUB2API_PROXY`，会把代理名称解析为 `proxy_id` 后写入账号
-- **更新已有账号时**：默认不覆盖你在 Sub2API 后台手动修改过的并发、优先级、倍率、模型白名单、WS mode、passthrough；代理绑定不会覆盖或清空已有 `proxy_id`
-- 如果设置 `SUB2API_OVERWRITE_ACCOUNT_SETTINGS=true`，则每次同步都会强制覆盖这些字段（代理绑定仍只在新建账号时写入）
+## 多 Team
 
-补充：
-
-- `SUB2API_PROXY` 支持 **代理名称** 或 **代理 ID**；名称会通过 Sub2API 管理接口解析为账号创建请求里的 `proxy_id`
-- `SUB2API_PROXY` 只作用于账号池 active 账号同步新建远端账号；同步主号 Codex 到 Sub2API 时不使用该配置
-- `SUB2API_PROXY` 不是代理 URL，也不会影响 `PLAYWRIGHT_PROXY_URL` 或 AutoTeam 访问 Sub2API 管理 API 的网络路径
-- `SUB2API_MODEL_WHITELIST` 会转换成 `credentials.model_mapping`
-- 留空表示 **不管理** `model_mapping`，不会主动清空已有白名单
-- `SUB2API_OPENAI_WS_MODE=off` 会写入：
-  - `openai_oauth_responses_websockets_v2_mode=off`
-  - `openai_oauth_responses_websockets_v2_enabled=false`
-
-## Playwright 代理
-
-AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）现在支持单独配置代理。
-
-推荐优先使用一个环境变量：
-
-```dotenv
-PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
-PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
-```
-
-如果代理需要认证，建议改用 HTTP 代理并直接写进 URL：
-
-```dotenv
-PLAYWRIGHT_PROXY_URL=http://username:password@host.docker.internal:1080
-```
-
-说明：
-
-- `PLAYWRIGHT_PROXY_URL` 会被解析为 Playwright 所需的 `server` / `username` / `password` 字段
-- Playwright / Chromium **不支持带认证的 socks5**，因此不要使用 `socks5://username:password@host:port`
-- `PLAYWRIGHT_PROXY_BYPASS` 建议至少包含 `localhost,127.0.0.1`，避免本地回调或容器内本地服务误走代理
-
-### 内联注释
-
-`.env` 支持尾部内联注释，例如：
-
-```env
-AUTO_CHECK_INTERVAL=300  # 5 分钟
-AUTO_CHECK_TARGET_SEATS=5
-AUTO_CHECK_RETRY_ADD_PHONE=true
-AUTO_CHECK_ADD_PHONE_MAX_RETRIES=3
-```
-
-Windows / macOS 下也会按 UTF-8 正常读取。
-
-## 管理员登录态
-
-首次启动后，在 Web 面板「配置面板 → 管理员 / 主号」或命令行完成主号登录：
-
-```bash
-uv run autoteam admin-login
-uv run autoteam admin-login --email you@example.com
-```
-
-系统会自动保存到 `state.json`，包括：
-- 邮箱
-- session token
-- workspace ID
-- workspace 名称
-- 密码（如果你走的是密码登录）
-
-## 主号 Codex 同步
-
-`main-codex-sync` 用于把管理员主号的 Codex 登录态单独同步到当前已启用远端（CPA / Sub2API）。
-
-- **前置条件**：先完成 `admin-login`
-- **结果文件**：`auths/codex-main-*.json`
-- **作用范围**：主号专用，不进入轮转池
-
-```bash
-uv run autoteam main-codex-sync
-```
-
-## 认证文件格式
-
-兼容 CLIProxyAPI，文件名格式：
-
-```text
-codex-{email}-{plan_type}-{hash}.json
-```
-
-文件内容示例：
+`TEAM_WORKSPACES_JSON` 可以是数组，也可以是包含 `teams` / `workspaces` / `items` 的对象。
 
 ```json
-{
-  "type": "codex",
-  "id_token": "eyJ...",
-  "access_token": "eyJ...",
-  "refresh_token": "rt_...",
-  "account_id": "...",
-  "email": "...",
-  "expired": "2026-04-20T10:00:00Z",
-  "last_refresh": "2026-04-10T10:00:00Z"
-}
+[
+  {
+    "id": "team-a",
+    "account_id": "uuid-a",
+    "workspace_name": "Team A",
+    "enabled": true,
+    "max_chatgpt_active": 2,
+    "pending_invite_email": "pending-a@example.com"
+  }
+]
 ```
 
-反向同步 (`pull-cpa`) 时，CPA 中下载回来的文件也会被重新整理成这个命名规范。
+字段：
 
-## 本地数据文件
+| 字段 | 说明 |
+|---|---|
+| `account_id` | Team/workspace ID，必填 |
+| `id` | 配置 ID，选填 |
+| `workspace_name` | 展示名称，选填 |
+| `enabled` | 是否参与调度，默认 `true` |
+| `max_chatgpt_active` | 当前 Team active 保留数，`1~5` |
+| `pending_invite_email` | 指定 pending invite 邮箱，选填 |
+| `email` | 独立管理员邮箱，选填 |
+| `session_token` | 独立 session，选填；留空共享默认管理员 session |
 
-| 文件 / 目录 | 作用 |
-|-------------|------|
-| `.env` | 运行配置 |
-| `accounts.json` | 本地账号池状态 |
-| `state.json` | 管理员登录态 |
-| `auths/` | 轮转账号与主号的 Codex 认证文件 |
-| `screenshots/` | 浏览器自动化调试截图 |
+## 白名单
 
-其中：
-- `auths/codex-main-*.json` 是主号专用
-- `auths/codex-{email}-{plan}-{hash}.json` 是轮转账号
-- 从 CPA 反向同步时会自动清理同账号重复文件
+```dotenv
+SWAP_SEAT_WHITELIST_EMAILS=owner@example.com;keep@example.com
+```
 
-## 启动验证
+分隔符支持逗号、分号、空格、换行。
 
-保存运行配置时会按当前邮箱服务 / 已启用目标验证连通性：
+白名单成员会完全跳过 swap_seat 管理，但其现有 ChatGPT seat / active OAuth 会占用 active 容量。
 
-- CloudMail：登录 → 创建测试邮箱 → 删除
-- Cloudflare Temp Email：登录 → 创建测试邮箱 → 删除
-- CPA：获取认证文件列表
-- Sub2API：管理员登录 → 获取 OpenAI OAuth 账号列表 → 校验 `SUB2API_GROUP`（如已填写）；`SUB2API_PROXY` 名称会在同步创建账号时解析
+## 自动巡检
 
-验证失败会提示具体哪个环节有问题，保存会被拒绝。
+```dotenv
+AUTO_CHECK_INTERVAL=300
+AUTO_CHECK_TARGET_SEATS=2
+AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true
+```
+
+行为：
+
+- 单 Team：按当前 Team 执行 swap 或自动检测替换。
+- 多 Team：逐个 enabled Team 执行调度。
+- 只有 `AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true` 且 Team 全员 quota 耗尽时，才消费 pending invite。
+
+## 冷却与 quota cache
+
+冷却文件：
+
+```text
+swap_seat_cooldown.json
+```
+
+quota cache 文件：
+
+```text
+swap_seat_quota_state.json
+```
+
+规则：
+
+- 每个 Team 每天最多 3 次有副作用 swap。
+- 每次有副作用 swap 至少间隔 2 小时。
+- quota cache 按 `account_id + auth_id` 隔离。
+- 新账号无记录时先检查 quota。
+- 未到 reset 时间的 exhausted 账号不会被重新检查，也不会被 swap 上来。
+
+## 管理员 session
+
+管理员 session 只用于 Team API，不是 OAuth 真相源。
+
+WebUI 路径：
+
+```text
+配置面板 → 管理员 / 主号
+```
+
+也可以 CLI：
+
+```bash
+uv run autoteam admin-login --email admin@example.com
+```
+
+## 归档兼容项
+
+以下配置可能仍存在，但不属于 swap_seat 主流程：
+
+- `SYNC_TARGET_SUB2API`
+- `SUB2API_*`
+- 旧本地账号池同步字段
+- 旧 OAuth 手动导入字段
+
+WebUI 会把这些字段放在归档兼容区域，避免影响 swap_seat 主流程。

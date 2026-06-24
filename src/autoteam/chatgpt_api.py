@@ -1499,7 +1499,25 @@ class ChatGPTTeamAPI:
             logger.warning("[ChatGPT] 未能获取 access token，将尝试无 token 调用")
             return None
 
+    def _assert_team_api_mutation_allowed(self, method, path):
+        """swap_seat-only 安全闸：允许改 seat，禁止任何 invite/kick/remove。"""
+        method_u = str(method or "").upper()
+        path_s = str(path or "")
+
+        if method_u == "DELETE" and "/backend-api/accounts/" in path_s and (
+            "/users/" in path_s or "/invites/" in path_s
+        ):
+            raise RuntimeError(
+                "swap_seat-only safety guard: Team member kick/remove 和 invite cancel 已禁用，"
+                "只能 PATCH /users/{id} 修改 seat_type"
+            )
+        if method_u == "POST" and path_s.rstrip("/").endswith("/invites"):
+            raise RuntimeError("swap_seat-only safety guard: Team invite 创建已禁用；只消费已有 pending invite")
+        if method_u == "PATCH" and "/backend-api/accounts/" in path_s and "/invites/" in path_s:
+            raise RuntimeError("swap_seat-only safety guard: invite seat 修改已禁用")
+
     def _api_fetch(self, method, path, body=None):
+        self._assert_team_api_mutation_allowed(method, path)
         if self.http_transport:
             return self._direct_api_fetch(method, path, body)
 
@@ -1507,7 +1525,27 @@ class ChatGPTTeamAPI:
             self._ensure_browser_session()
         return self._browser_api_fetch(method, path, body)
 
+    def update_member_seat_type(self, user_id, seat_type):
+        path = f"/backend-api/accounts/{self.account_id}/users/{user_id}"
+        body = {"seat_type": seat_type}
+
+        logger.info("[ChatGPT] 修改成员 %s seat_type -> %s...", user_id, seat_type)
+        result = self._api_fetch("PATCH", path, body)
+
+        if result["status"] in (200, 204):
+            logger.info("[ChatGPT] 成员 %s seat_type 已改为 %s", user_id, seat_type)
+        else:
+            logger.error(
+                "[ChatGPT] 修改成员 %s seat_type 失败: %d %s",
+                user_id,
+                result["status"],
+                result["body"][:200],
+            )
+        return result
+
     def invite_member(self, email, seat_type="usage_based"):
+        raise RuntimeError("swap_seat-only 模式禁用创建新 Team invite；请只消费已有 pending invite")
+
         path = f"/backend-api/accounts/{self.account_id}/invites"
         body = {
             "email_addresses": [email],
@@ -1516,40 +1554,19 @@ class ChatGPTTeamAPI:
             "resend_emails": True,
         }
 
-        logger.info("[ChatGPT] 发送邀请到 %s (seat_type=%s)...", email, seat_type)
+        logger.info("[ChatGPT] 发送兜底邀请到 %s (seat_type=%s)...", email, seat_type)
         result = self._api_fetch("POST", path, body)
-
-        status = result["status"]
-        resp_body = result["body"]
-        logger.info("[ChatGPT] 响应状态: %d", status)
-
+        status = int(result.get("status") or 0)
+        resp_body = str(result.get("body") or "")
         try:
             data = json.loads(resp_body)
-            logger.debug("[ChatGPT] 响应内容: %s", json.dumps(data, indent=2)[:500])
         except Exception:
             data = resp_body
-            logger.debug("[ChatGPT] 响应内容: %s", resp_body[:500])
-
-        if status == 200 and seat_type == "usage_based" and isinstance(data, dict):
-            invites = data.get("account_invites", [])
-            for inv in invites:
-                invite_id = inv.get("id")
-                if invite_id:
-                    self._update_invite_seat_type(invite_id, "default")
-
+        logger.info("[ChatGPT] 兜底邀请响应: HTTP %d", status)
         return status, data
 
     def _update_invite_seat_type(self, invite_id, seat_type):
-        path = f"/backend-api/accounts/{self.account_id}/invites/{invite_id}"
-        body = {"seat_type": seat_type}
-
-        logger.info("[ChatGPT] 修改邀请 seat_type -> %s...", seat_type)
-        result = self._api_fetch("PATCH", path, body)
-
-        if result["status"] == 200:
-            logger.info("[ChatGPT] seat_type 已改为 %s", seat_type)
-        else:
-            logger.error("[ChatGPT] 修改 seat_type 失败: %d %s", result["status"], result["body"][:200])
+        raise RuntimeError("swap_seat-only 模式已禁用修改邀请；请等待已加入成员后再切换 seat")
 
     def list_invites(self):
         path = f"/backend-api/accounts/{self.account_id}/invites"

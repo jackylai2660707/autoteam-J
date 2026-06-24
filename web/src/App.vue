@@ -23,7 +23,7 @@
             <span class="bg-gradient-to-r from-blue-300 via-cyan-300 to-sky-400 bg-clip-text text-transparent">Team 管理面板</span>
           </h1>
           <p class="mt-5 max-w-2xl text-lg leading-8 text-slate-300">
-            一个入口处理账号池、同步、OAuth、配置和巡检。先用 API Key 登录，后面的运行配置都可以在面板里直接改。
+            一个入口围绕 swap_seat：CPA quota 检查、seat 收敛和 OAuth active/disabled 启停；消费 pending invite 前会先把非白名单旧成员切到 Codex seat，绝不 kick Team 成员。
           </p>
           <div class="mt-8 grid max-w-2xl grid-cols-3 gap-4">
             <div class="glass-card-soft p-4">
@@ -34,7 +34,7 @@
             <div class="glass-card-soft p-4">
               <div class="text-2xl">🔄</div>
               <div class="mt-3 text-sm font-medium text-white">自动巡检</div>
-              <div class="mt-1 text-xs leading-5 text-slate-400">阈值触发轮转与补位</div>
+              <div class="mt-1 text-xs leading-5 text-slate-400">定时触发 swap_seat</div>
             </div>
             <div class="glass-card-soft p-4">
               <div class="text-2xl">🔐</div>
@@ -80,7 +80,7 @@
           </div>
 
           <div class="mt-5 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs leading-6 text-slate-400">
-            如果你是首次部署，启动后只需要先配置 API Key。CloudMail、CPA / Sub2API、代理等运行项可以在登录后进入配置面板继续设置。
+            如果你是首次部署，启动后只需要先配置 API Key、管理员 session 和 CPA。账号 OAuth/auth 统一在 CPA 管理。
           </div>
         </div>
       </div>
@@ -114,16 +114,14 @@
           <span class="font-medium">
             {{ busyTask.command === 'admin-login'
               ? '管理员登录中...'
-              : busyTask.command === 'main-codex-sync'
-                ? '主号 Codex 同步中...'
-                : `${busyTask.command} 执行中...` }}
+              : `${commandLabel(busyTask.command)} 执行中...` }}
           </span>
         </div>
 
       <!-- 页面内容 -->
         <Dashboard v-if="currentPage === 'dashboard'"
-          :status="status" :loading="loading" :running-task="busyTask" :admin-status="adminStatus"
-          @refresh="refresh" @task-started="onTaskStarted" />
+          :loading="loading" :running-task="busyTask" :admin-status="adminStatus"
+          @refresh="refresh" @task-started="onTaskStarted" @navigate="currentPage = $event" />
 
         <ConfigPage
           v-else-if="currentPage === 'config'"
@@ -133,18 +131,16 @@
           @admin-progress="onAdminProgress"
         />
 
-        <TeamMembers v-else-if="currentPage === 'team'" />
+        <TeamMembers
+          v-else-if="currentPage === 'team'"
+          :running-task="busyTask"
+          :admin-status="adminStatus"
+          @task-started="onTaskStarted"
+        />
 
         <PoolPage v-else-if="currentPage === 'pool'"
           :running-task="busyTask" :admin-status="adminStatus"
           @task-started="onTaskStarted" @refresh="refresh" />
-
-        <SyncPage v-else-if="currentPage === 'sync'"
-          :running-task="busyTask" :admin-status="adminStatus"
-          @task-started="onTaskStarted" @refresh="refresh" />
-
-        <OAuthPage v-else-if="currentPage === 'oauth'"
-          :manual-account-status="manualAccountStatus" @refresh="refresh" @progress="onAdminProgress" />
 
         <TaskHistoryPage v-else-if="currentPage === 'tasks'"
           :tasks="tasks" />
@@ -164,10 +160,8 @@ import Dashboard from './components/Dashboard.vue'
 import ConfigPage from './components/ConfigPage.vue'
 import TeamMembers from './components/TeamMembers.vue'
 import PoolPage from './components/PoolPage.vue'
-import SyncPage from './components/SyncPage.vue'
 import TaskHistoryPage from './components/TaskHistoryPage.vue'
 import LogViewer from './components/LogViewer.vue'
-import OAuthPage from './components/OAuthPage.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { initTheme } from './theme.js'
 
@@ -179,19 +173,14 @@ const authError = ref('')
 const inputKey = ref('')
 const currentPage = ref('dashboard')
 
-const status = ref(null)
 const adminStatus = ref(null)
 const codexStatus = ref(null)
-const manualAccountStatus = ref(null)
 const tasks = ref([])
 const loading = ref(false)
 const runningTask = ref(null)
 const busyTask = computed(() => {
   if (adminStatus.value?.login_in_progress) {
     return { command: 'admin-login' }
-  }
-  if (codexStatus.value?.in_progress) {
-    return { command: 'main-codex-sync' }
   }
   return runningTask.value
 })
@@ -244,21 +233,28 @@ function doLogout() {
   stopPolling()
 }
 
+function commandLabel(command) {
+  return {
+    'swap-seats': 'swap_seat',
+    'auto-swap-seats': '自动 swap_seat',
+    'auto-detect-replace': '自动检测替换',
+    'manage-teams': '多 Team 调度',
+    'consume-pending-invite': '消费 pending invite',
+    check: 'quota 检查',
+    rotate: 'swap_seat',
+  }[command] || command
+}
+
 async function refresh() {
   loading.value = true
   try {
-    const [s, t, admin, codex, manualAccount] = await Promise.all([
-      api.getStatus(),
+    const [t, admin] = await Promise.all([
       api.getTasks(),
       api.getAdminStatus(),
-      api.getMainCodexStatus(),
-      api.getManualAccountStatus(),
     ])
-    status.value = s
     tasks.value = t
     adminStatus.value = admin
-    codexStatus.value = codex
-    manualAccountStatus.value = manualAccount
+    codexStatus.value = null
     runningTask.value = t.find(t => t.status === 'running' || t.status === 'pending') || null
   } catch (e) {
     if (e.status === 401) {

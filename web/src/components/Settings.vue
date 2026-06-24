@@ -5,7 +5,7 @@
         <div>
           <h2 class="text-lg font-semibold text-white">管理员登录</h2>
           <p class="text-sm text-gray-400 mt-1">
-            首次启动先在这里完成主号登录，系统会统一写入单个 state.json 文件，保存邮箱、session、workspace ID、workspace 名称；如果你走了密码登录，也会保留密码供主号 Codex 复用。
+            首次启动先在这里完成管理员登录，系统只保存 Team API 所需的邮箱、session、workspace ID、workspace 名称；账号 OAuth/auth 由 CPA 管理。
           </p>
         </div>
         <span
@@ -82,7 +82,7 @@
         </div>
         <div class="px-3 py-3 bg-gray-800/60 border border-gray-800 rounded-lg md:col-span-2">
           <div class="text-gray-500 mb-1">管理员密码</div>
-          <div class="text-white">{{ props.adminStatus?.password_saved ? '已保存，可用于主号 Codex 登录' : '未保存' }}</div>
+          <div class="text-white">{{ props.adminStatus?.password_saved ? '已保存（仅管理员登录流程历史状态）' : '未保存' }}</div>
         </div>
       </div>
 
@@ -157,31 +157,13 @@
           </div>
         </div>
 
-        <div v-else-if="!codexBusy" class="flex flex-wrap gap-3">
-          <button
-            @click="loginMainCodex"
-            :disabled="submitting || syncingMain || deletingMainRemoteFiles"
-            class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white text-sm rounded-lg transition disabled:opacity-50"
-          >
-            {{ syncingMain && mainCodexSubmittingAction === 'login' ? '登录中...' : '登录主号 Codex' }}
-          </button>
-          <button
-            @click="syncMainCodex"
-            :disabled="submitting || syncingMain || deletingMainRemoteFiles"
-            class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white text-sm rounded-lg transition disabled:opacity-50"
-          >
-            {{ syncingMain && mainCodexSubmittingAction === 'sync' ? '同步中...' : '同步主号 Codex 到已启用远端' }}
-          </button>
-          <button
-            @click="deleteMainCodexFromRemoteFiles"
-            :disabled="submitting || syncingMain || deletingMainRemoteFiles"
-            class="px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white text-sm rounded-lg transition disabled:opacity-50"
-          >
-            {{ deletingMainRemoteFiles ? '删除中...' : '从已启用远端删除主号文件' }}
-          </button>
+        <div v-else class="space-y-3">
+          <div class="rounded-xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+            主号 Codex OAuth/auth 由 CPA 管理；AutoTeam 不再登录、同步或删除主号 OAuth。swap_seat 会强制母号/admin 使用 Codex seat。
+          </div>
           <button
             @click="logoutAdmin"
-            :disabled="submitting || syncingMain || deletingMainRemoteFiles"
+            :disabled="submitting"
             class="px-4 py-2 bg-rose-700/80 hover:bg-rose-700 text-white text-sm rounded-lg transition disabled:opacity-50"
           >
             {{ submitting ? '处理中...' : '清除登录态' }}
@@ -273,62 +255,6 @@
         </div>
       </div>
 
-      <div v-if="codexBusy" class="mt-4 space-y-4 border-t border-gray-800 pt-4">
-        <div class="text-sm text-gray-300">
-          主号 Codex{{ codexActionLabel }}继续中
-        </div>
-
-        <div v-if="props.codexStatus?.step === 'password_required'" class="flex flex-col sm:flex-row gap-3">
-          <input
-            v-model="codexPassword"
-            type="password"
-            autocomplete="current-password"
-            placeholder="输入主号密码"
-            :disabled="syncingMain"
-            class="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
-          />
-          <button
-            @click="submitMainCodexPassword"
-            :disabled="syncingMain || !codexPassword"
-            class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white text-sm rounded-lg transition disabled:opacity-50"
-          >
-            {{ syncingMain ? '提交中...' : '提交密码' }}
-          </button>
-        </div>
-
-        <div v-else-if="props.codexStatus?.step === 'code_required'" class="flex flex-col sm:flex-row gap-3">
-          <input
-            v-model.trim="codexCode"
-            type="text"
-            inputmode="numeric"
-            autocomplete="one-time-code"
-            placeholder="输入主号 Codex 验证码"
-            :disabled="syncingMain"
-            class="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
-          />
-          <button
-            @click="submitMainCodexCode"
-            :disabled="syncingMain || !codexCode"
-            class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white text-sm rounded-lg transition disabled:opacity-50"
-          >
-            {{ syncingMain ? '提交中...' : '提交验证码' }}
-          </button>
-        </div>
-
-        <div v-if="syncingMain && codexSubmittingHint" class="text-xs text-cyan-300">
-          {{ codexSubmittingHint }}
-        </div>
-
-        <div class="flex justify-end">
-          <button
-            @click="cancelMainCodexSync"
-            :disabled="syncingMain"
-            class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-sm text-gray-200 rounded-lg border border-gray-700 transition disabled:opacity-50"
-          >
-            取消主号 Codex 登录
-          </button>
-        </div>
-      </div>
     </div>
 
     <div v-if="showAutoCheckSection" class="glass-card p-5">
@@ -337,7 +263,7 @@
         <span v-if="saved" class="text-xs text-green-400 transition">已保存</span>
       </div>
 
-      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <div>
           <label class="block text-sm text-gray-400 mb-1">巡检间隔</label>
           <div class="flex items-center gap-2">
@@ -347,75 +273,40 @@
           </div>
         </div>
         <div>
-          <label class="block text-sm text-gray-400 mb-1">总 seat 数</label>
+          <label class="block text-sm text-gray-400 mb-1">ChatGPT/OAuth active 保留数</label>
           <div class="flex items-center gap-2">
-            <input v-model.number="form.target_seats" type="number" min="1"
+            <input v-model.number="form.target_seats" type="number" min="1" max="5"
               class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
             <span class="text-sm text-gray-500 shrink-0">个</span>
-          </div>
-        </div>
-        <div>
-          <label class="block text-sm text-gray-400 mb-1">额度阈值</label>
-          <div class="flex items-center gap-2">
-            <input v-model.number="form.threshold" type="number" min="1" max="100"
-              class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
-            <span class="text-sm text-gray-500 shrink-0">%</span>
-          </div>
-        </div>
-        <div>
-          <label class="block text-sm text-gray-400 mb-1">触发账号数</label>
-          <div class="flex items-center gap-2">
-            <input v-model.number="form.min_low" type="number" min="1"
-              class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
-            <span class="text-sm text-gray-500 shrink-0">个</span>
-          </div>
-        </div>
-        <div>
-          <label class="block text-sm text-gray-400 mb-1">手机号验证自动重试</label>
-          <select
-            v-model="form.retry_add_phone"
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
-          >
-            <option :value="true">开启</option>
-            <option :value="false">关闭</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-sm text-gray-400 mb-1">手机号验证最大重试</label>
-          <div class="flex items-center gap-2">
-            <input
-              v-model.number="form.add_phone_max_retries"
-              type="number"
-              min="1"
-              class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
-            />
-            <span class="text-sm text-gray-500 shrink-0">次</span>
           </div>
         </div>
       </div>
 
-      <div class="mt-3 flex items-center justify-between gap-3">
-        <p class="text-xs text-gray-500">
-          每 {{ form.interval }} 分钟检查一次，按 Team 总 seat {{ form.target_seats }} 个做自动轮转 / 补位判断；
-          {{ form.min_low }} 个以上账号剩余低于 {{ form.threshold }}% 时自动轮转；
-          <span v-if="form.target_seats === 2">seat=2 时会对低额度子号启用 best-effort 预切换，若满员无法先加新号则自动回退到先移后补；</span>
-          add_phone {{ form.retry_add_phone ? `开启自动重试（最多 ${form.add_phone_max_retries} 次）` : '保持人工处理' }}
+      <label class="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-gray-800 bg-gray-800/40 px-4 py-3">
+        <input
+          v-model="form.replace_with_pending_invite"
+          type="checkbox"
+          class="mt-1 h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
+        />
+        <span class="text-sm">
+          <span class="block font-medium text-white">Team 内全部 quota 耗尽时，自动消费 pending invite 替换</span>
+          <span class="mt-1 block text-xs leading-5 text-gray-400">
+            自动巡检会先运行 swap_seat；只有 CPA 判定没有任何 Team member 同时具备 5h + weekly quota 时，才从现有 pending invite 中选一个 CF 邮箱注册。注册前旧成员切 Codex，注册后新号切 ChatGPT/OAuth active；不会创建新 invite，也不会 kick/remove/cancel invite。
+          </span>
+        </span>
+      </label>
+
+      <div class="mt-3 flex items-start justify-between gap-3">
+        <p class="text-xs leading-5 text-gray-500">
+          每 {{ form.interval }} 分钟触发一次：
+          <span v-if="form.replace_with_pending_invite">自动检测 → 必要时 pending invite 替换</span>
+          <span v-else>swap_seat 收敛</span>。
+          若配置了多 Team，会逐个 Team 独立执行同一策略。通过 CPA 检查所有 Team member 的 5h + weekly quota，保留 {{ form.target_seats }} 个 ChatGPT seat/OAuth active（允许 1~5）；母号/admin 和其余非白名单成员全部 Codex；白名单不查 quota、不切 seat、不改 CPA OAuth。
         </p>
         <button @click="save" :disabled="saving"
-          class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition disabled:opacity-50">
+          class="shrink-0 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition disabled:opacity-50">
           {{ saving ? '保存中...' : '保存' }}
         </button>
-      </div>
-
-      <div
-        v-if="form.target_seats === 2"
-        class="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs leading-6 text-amber-200"
-      >
-        <div class="font-medium text-amber-100">注意事项</div>
-        <div class="mt-1">
-          为了尽量实现 2-seat 的无感切换，系统会优先尝试“先加账号、再踢旧账号”，因此短时间内可能出现额外占位，
-          导致下个月账单比预期多一些。若不希望这样，可将主号的 seat type 改成 codex，并保持这里的总 seat 数仍为 2。
-        </div>
       </div>
     </div>
   </div>
@@ -442,7 +333,11 @@ const props = defineProps({
 
 const emit = defineEmits(['refresh', 'admin-progress'])
 
-const form = ref({ interval: 5, target_seats: 5, threshold: 10, min_low: 2, retry_add_phone: true, add_phone_max_retries: 3 })
+const form = ref({
+  interval: 5,
+  target_seats: 2,
+  replace_with_pending_invite: false,
+})
 const saving = ref(false)
 const saved = ref(false)
 
@@ -453,21 +348,13 @@ const password = ref('')
 const code = ref('')
 const workspaceOptionId = ref('')
 const loginEmail = ref('')
-const codexPassword = ref('')
-const codexCode = ref('')
 const submitting = ref(false)
-const syncingMain = ref(false)
-const mainCodexSubmittingAction = ref('')
-const deletingMainRemoteFiles = ref(false)
 const message = ref('')
 const messageClass = ref('')
 const adminSubmittingHint = ref('')
-const codexSubmittingHint = ref('')
 
 const adminConfigured = computed(() => !!props.adminStatus?.configured)
 const adminBusy = computed(() => !!props.adminStatus?.login_in_progress)
-const codexBusy = computed(() => !!props.codexStatus?.in_progress)
-const codexActionLabel = computed(() => props.codexStatus?.action === 'sync' ? '同步' : '登录')
 const showAdminSection = computed(() => props.section !== 'auto-check')
 const showAutoCheckSection = computed(() => props.section !== 'admin')
 
@@ -488,18 +375,6 @@ watch(
     if (next?.login_step === 'workspace_required' && !workspaceOptionId.value) {
       const preferred = next?.workspace_options?.find(opt => opt.kind === 'preferred')
       workspaceOptionId.value = preferred?.id || next?.workspace_options?.[0]?.id || ''
-    }
-  },
-  { immediate: true },
-)
-
-watch(
-  () => props.codexStatus,
-  (next) => {
-    if (!next?.in_progress) {
-      codexPassword.value = ''
-      codexCode.value = ''
-      codexSubmittingHint.value = ''
     }
   },
   { immediate: true },
@@ -527,11 +402,8 @@ async function loadAutoCheckConfig() {
     const cfg = await api.getAutoCheckConfig()
     form.value = {
       interval: Math.round(cfg.interval / 60),
-      target_seats: cfg.target_seats ?? 5,
-      threshold: cfg.threshold,
-      min_low: cfg.min_low,
-      retry_add_phone: cfg.retry_add_phone ?? true,
-      add_phone_max_retries: cfg.add_phone_max_retries ?? 3,
+      target_seats: clampActiveLimit(cfg.target_seats ?? 2),
+      replace_with_pending_invite: !!cfg.replace_with_pending_invite,
     }
   } catch (e) {
     console.error('加载巡检配置失败:', e)
@@ -646,119 +518,19 @@ async function logoutAdmin() {
   }
 }
 
-async function loginMainCodex() {
-  syncingMain.value = true
-  mainCodexSubmittingAction.value = 'login'
-  codexSubmittingHint.value = '正在打开主号 Codex 登录页...'
-  try {
-    const result = await api.startMainCodexLogin()
-    setMessage(result.status === 'completed' ? (result.message || '主号 Codex 已登录') : '主号 Codex 登录进入下一步')
-    emit('admin-progress')
-  } catch (e) {
-    setMessage(e.message, 'error')
-  } finally {
-    syncingMain.value = false
-    mainCodexSubmittingAction.value = ''
-    codexSubmittingHint.value = ''
-  }
-}
-
-async function syncMainCodex() {
-  syncingMain.value = true
-  mainCodexSubmittingAction.value = 'sync'
-  codexSubmittingHint.value = '正在打开主号 Codex 登录页...'
-  try {
-    const result = await api.startMainCodexSync()
-    setMessage(result.status === 'completed' ? (result.message || '主号 Codex 已同步') : '主号 Codex 登录进入下一步')
-    emit('admin-progress')
-  } catch (e) {
-    setMessage(e.message, 'error')
-  } finally {
-    syncingMain.value = false
-    mainCodexSubmittingAction.value = ''
-    codexSubmittingHint.value = ''
-  }
-}
-
-async function submitMainCodexPassword() {
-  syncingMain.value = true
-  mainCodexSubmittingAction.value = props.codexStatus?.action || 'login'
-  codexSubmittingHint.value = '密码已提交，正在等待主号 Codex 登录页响应...'
-  try {
-    const result = await api.submitMainCodexPassword(codexPassword.value)
-    setMessage(result.status === 'completed' ? (result.message || '主号 Codex 已同步') : '主号 Codex 密码已提交')
-    emit('admin-progress')
-  } catch (e) {
-    setMessage(e.message, 'error')
-  } finally {
-    syncingMain.value = false
-    mainCodexSubmittingAction.value = ''
-    codexSubmittingHint.value = ''
-  }
-}
-
-async function submitMainCodexCode() {
-  syncingMain.value = true
-  mainCodexSubmittingAction.value = props.codexStatus?.action || 'login'
-  codexSubmittingHint.value = '验证码已提交，正在等待主号 Codex 登录页响应，通常需要 5 到 10 秒...'
-  try {
-    const result = await api.submitMainCodexCode(codexCode.value)
-    setMessage(result.status === 'completed' ? (result.message || '主号 Codex 已同步') : '主号 Codex 验证码已提交')
-    emit('admin-progress')
-  } catch (e) {
-    setMessage(e.message, 'error')
-  } finally {
-    syncingMain.value = false
-    mainCodexSubmittingAction.value = ''
-    codexSubmittingHint.value = ''
-  }
-}
-
-async function cancelMainCodexSync() {
-  syncingMain.value = true
-  try {
-    await api.cancelMainCodexSync()
-    setMessage('主号 Codex 登录已取消')
-    emit('refresh')
-  } catch (e) {
-    setMessage(e.message, 'error')
-  } finally {
-    syncingMain.value = false
-  }
-}
-
-async function deleteMainCodexFromRemoteFiles() {
-  deletingMainRemoteFiles.value = true
-  try {
-    const result = await api.deleteMainCodexFromRemoteFiles()
-    setMessage(result.message || '已从已启用远端删除主号文件')
-    emit('refresh')
-  } catch (e) {
-    setMessage(e.message, 'error')
-  } finally {
-    deletingMainRemoteFiles.value = false
-  }
-}
-
 async function save() {
   saving.value = true
   saved.value = false
   try {
     const cfg = await api.setAutoCheckConfig({
       interval: form.value.interval * 60,
-      target_seats: form.value.target_seats,
-      threshold: form.value.threshold,
-      min_low: form.value.min_low,
-      retry_add_phone: !!form.value.retry_add_phone,
-      add_phone_max_retries: form.value.add_phone_max_retries,
+      target_seats: clampActiveLimit(form.value.target_seats),
+      replace_with_pending_invite: !!form.value.replace_with_pending_invite,
     })
     form.value = {
       interval: Math.round(cfg.interval / 60),
-      target_seats: cfg.target_seats ?? 5,
-      threshold: cfg.threshold,
-      min_low: cfg.min_low,
-      retry_add_phone: cfg.retry_add_phone ?? true,
-      add_phone_max_retries: cfg.add_phone_max_retries ?? 3,
+      target_seats: clampActiveLimit(cfg.target_seats ?? 2),
+      replace_with_pending_invite: !!cfg.replace_with_pending_invite,
     }
     saved.value = true
     setTimeout(() => { saved.value = false }, 3000)
@@ -767,5 +539,11 @@ async function save() {
   } finally {
     saving.value = false
   }
+}
+
+function clampActiveLimit(value) {
+  const n = Number.parseInt(value, 10)
+  if (Number.isNaN(n)) return 2
+  return Math.max(1, Math.min(5, n))
 }
 </script>

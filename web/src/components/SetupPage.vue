@@ -18,7 +18,7 @@
             ，再进入面板继续配置
           </h1>
           <p class="mt-5 max-w-2xl text-lg leading-8 text-slate-300">
-            现在启动阶段只强制要求 API Key。CloudMail、CPA / Sub2API、代理等运行项都可以在登录后去配置面板里慢慢填。
+            现在启动阶段只强制要求 API Key。管理员 session、CPA、CFMail、多 Team 和巡检策略都可以在登录后去配置面板里补齐。
           </p>
 
           <div class="mt-8 grid max-w-2xl grid-cols-3 gap-4">
@@ -76,7 +76,7 @@
           </button>
 
           <div class="mt-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs leading-6 text-slate-400">
-            保存后你可以继续去配置面板补充 CloudMail、CPA / Sub2API、代理以及巡检参数。
+            保存后你可以继续去配置面板补充 CPA、CFMail、Team 列表、白名单和巡检参数；旧同步/账号池设置已归档。
           </div>
         </div>
       </div>

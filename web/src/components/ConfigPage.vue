@@ -10,30 +10,30 @@
           </div>
           <h2 class="section-heading">配置面板</h2>
           <p class="section-subtitle max-w-2xl">
-            按邮箱服务、远端同步、安全、管理员、巡检、源文件编辑和代理拆成独立分区，避免把所有运行配置堆在一个页面里。
+            围绕 swap_seat 配置 CPA、CFMail、多 Team、自动巡检和白名单；CPA 是 OAuth/auth 真相源，AutoTeam 只负责 quota 检查、seat 收敛和 pending invite 消费。
           </p>
         </div>
 
         <div class="status-badge max-w-sm text-xs leading-6 text-slate-400">
-          高频配置前置，低频配置后置；代理等高级项默认折叠，源文件编辑仍然保留。
+          高频配置前置，归档兼容项后置；页面不会提供 kick/remove/cancel invite 入口。
         </div>
       </div>
 
       <div class="mt-6 grid gap-4 md:grid-cols-3">
         <div class="glass-card-soft p-4">
           <div class="text-2xl">🧩</div>
-          <div class="mt-3 text-sm font-medium text-white">独立配置分区</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">邮箱服务、同步、安全等高频项前置，低频代理项后置，不再混在一张表单里。</div>
+          <div class="mt-3 text-sm font-medium text-white">swap_seat 专用</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">只配置 quota 检查、seat/OAuth active 收敛、多 Team 和白名单。</div>
         </div>
         <div class="glass-card-soft p-4">
-          <div class="text-2xl">☁️</div>
-          <div class="mt-3 text-sm font-medium text-white">动态同步配置</div>
-          <div class="mt-1 text-xs leading-5 text-slate-400">可增删多个邮箱服务 / 启用远端目标，再按状态展示对应配置。</div>
+          <div class="text-2xl">🏢</div>
+          <div class="mt-3 text-sm font-medium text-white">多 Team 调度</div>
+          <div class="mt-1 text-xs leading-5 text-slate-400">每个 Team 独立 quota 缓存、冷却和 pending invite 消费。</div>
         </div>
         <div class="glass-card-soft p-4">
-          <div class="text-2xl">📝</div>
-          <div class="mt-3 text-sm font-medium text-white">源文件编辑保留</div>
-          <div class="mt-1 text-xs leading-5 text-slate-400">可视化配置之外，仍可直接维护完整 .env 源文件。</div>
+          <div class="text-2xl">🛡️</div>
+          <div class="mt-3 text-sm font-medium text-white">安全边界固定</div>
+          <div class="mt-1 text-xs leading-5 text-slate-400">只允许 swap seat 和 CPA auth enable/disable，不会移除成员或取消邀请。</div>
         </div>
       </div>
     </div>
@@ -110,7 +110,7 @@
             <div>
               <div class="text-sm font-medium text-white">邮箱服务列表</div>
               <div class="mt-1 text-xs leading-5 text-slate-400">
-                可以同时添加多个 CloudMail / Cloudflare Temp Email 实例；默认服务用于新建账号，已有账号会优先复用自身绑定或唯一域名匹配到的服务。
+                pending invite 替换只会使用 CFMail / Cloudflare Temp Email；可配置多个域名，支持随机子域名。CloudMail 仅作为旧环境兼容项保留。
               </div>
             </div>
             <div class="status-badge text-xs text-slate-400">
@@ -119,13 +119,21 @@
           </div>
 
           <div class="mt-4 flex flex-wrap gap-3">
-            <button class="btn-secondary" @click="addMailService('cloudmail')">
-              + 添加 CloudMail
-            </button>
-            <button class="btn-secondary" @click="addMailService('cloudflare_temp_email')">
-              + 添加 Cloudflare Temp Email
+            <button class="btn-primary" @click="addMailService('cloudflare_temp_email')">
+              + 添加 CFMail / Cloudflare Temp Email
             </button>
           </div>
+          <details class="mt-3 rounded-xl border border-white/10 bg-slate-950/25 px-4 py-3">
+            <summary class="cursor-pointer text-xs font-medium text-slate-300">
+              归档兼容：CloudMail
+            </summary>
+            <p class="mt-2 text-xs leading-5 text-slate-500">
+              新流程建议使用 CFMail / Cloudflare Temp Email 来消费已有 pending invite。CloudMail 只保留给旧环境兼容。
+            </p>
+            <button class="btn-secondary mt-3" @click="addMailService('cloudmail')">
+              + 添加 CloudMail（兼容）
+            </button>
+          </details>
         </div>
 
         <div
@@ -220,7 +228,7 @@
 
         <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
           <p class="text-xs leading-6 text-slate-400">
-            保存后会立即热加载。新建账号会使用默认服务；已有账号会优先按 `mail_service_id` 或唯一邮箱域名匹配对应服务。
+            保存后会立即热加载。消费 pending invite 时会按邮箱域名匹配对应 CFMail 服务；无法匹配时使用默认服务。
           </p>
           <button
             @click="saveRuntimeConfig"
@@ -232,44 +240,21 @@
         </div>
       </div>
 
-      <div v-else-if="selectedRuntimeCategory === 'sync'" class="space-y-5">
+      <div v-else-if="selectedRuntimeCategory === 'cpa'" class="space-y-5">
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
           <div class="mb-4 flex items-center justify-between gap-4">
             <div>
-              <div class="text-sm font-medium text-white">同步目标开关</div>
+              <div class="text-sm font-medium text-white">CPA 管理端</div>
               <div class="mt-1 text-xs leading-5 text-slate-400">
-                可同时启用多个远端。界面只展示当前已启用目标的详细配置。
+                AutoTeam 只调用 CPA API 读取 auth-files、检查 5h/weekly quota，并启用/禁用 OAuth active。
               </div>
             </div>
             <div class="status-badge text-xs text-slate-400">
-              {{ enabledSyncTargetsText }}
-            </div>
-          </div>
-          <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div v-for="field in syncToggleFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-              <label class="mb-2 block text-sm font-medium text-slate-300">
-                {{ field.prompt }}
-              </label>
-              <select
-                v-model="runtimeForm[field.key]"
-                class="input-dark"
-              >
-                <option value="true">启用</option>
-                <option value="false">关闭</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="syncCpaEnabled" class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">CPA</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              为已启用的 CPA 远端填写连接地址和管理密钥。
+              {{ cpaStatusText }}
             </div>
           </div>
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in syncCpaFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+            <div v-for="field in cpaFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
@@ -284,44 +269,17 @@
           </div>
         </div>
 
-        <div v-if="syncSub2apiEnabled" class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">Sub2API</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              为已启用的 Sub2API 远端填写地址、管理员邮箱、密码和可选分组。
-            </div>
-          </div>
-          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in syncSub2apiConnectionFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+        <details v-if="cpaArchivedFields.length" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <summary class="cursor-pointer text-sm font-medium text-slate-300">
+            归档兼容设置（Sub2API / 旧同步开关）
+          </summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">
+            swap_seat 主流程不会依赖这些字段；仅保留给旧环境迁移或排查使用。
+          </p>
+          <div class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="field in cpaArchivedFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
-                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
-                <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
-                  {{ sub2apiFieldHint(field.key) }}
-                </div>
-              </label>
-              <input
-                v-model="runtimeForm[field.key]"
-                :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
-                class="input-dark"
-              />
-            </div>
-          </div>
-        </div>
-
-        <div v-if="syncSub2apiEnabled" class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">Sub2API 默认账号设置</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              新创建的 Sub2API 账号会自动带上这些默认参数和可选代理绑定；已存在账号默认不覆盖，只有开启“覆盖账号设置”后才会在每次同步时强制统一（代理绑定仍只在新建账号时写入）。
-            </div>
-          </div>
-          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in syncSub2apiDefaultFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-              <label class="mb-2 block text-sm font-medium text-slate-300">
-                {{ field.prompt }}
-                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
                 <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
                   {{ sub2apiFieldHint(field.key) }}
                 </div>
@@ -353,15 +311,11 @@
               />
             </div>
           </div>
-        </div>
-
-        <div v-if="!syncCpaEnabled && !syncSub2apiEnabled" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-slate-400">
-          当前还没有启用任何远端同步目标。先打开上面的开关，再填写对应远端配置。
-        </div>
+        </details>
 
         <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
           <p class="text-xs leading-6 text-slate-400">
-            保存后会立即热加载；账号池操作会根据当前已启用远端决定后续同步行为。
+            保存后会立即热加载；填写 CPA_URL / CPA_KEY 后即可运行多 Team quota 检查与 seat/OAuth 收敛。
           </p>
           <button
             @click="saveRuntimeConfig"
@@ -418,6 +372,134 @@
         </div>
       </div>
 
+      <div v-else-if="selectedRuntimeCategory === 'teams'" class="space-y-5">
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div class="text-sm font-medium text-white">受管 Team 列表</div>
+              <div class="mt-1 text-xs leading-5 text-slate-400">
+                每个 Team 可单独设置 ChatGPT/OAuth active 保留数（1~5）和指定 pending invite。留空则只管理当前管理员 session 的默认 Team。
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button class="btn-secondary" @click="addTeamRow">
+                + 添加 Team
+              </button>
+              <button class="btn-secondary" @click="reloadTeamRowsFromJson">
+                从 JSON 重新载入
+              </button>
+            </div>
+          </div>
+
+          <div v-if="teamJsonError" class="mt-4 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            {{ teamJsonError }}
+          </div>
+
+          <div v-if="!teamRows.length" class="mt-4 rounded-2xl border border-dashed border-white/10 bg-slate-950/25 px-4 py-6 text-sm text-slate-400">
+            当前未配置多 Team。系统会回退当前管理员登录态绑定的 Team。需要同时管理多个 Team 时，点击「添加 Team」。
+          </div>
+
+          <div v-else class="mt-4 grid gap-4 xl:grid-cols-2">
+            <div
+              v-for="(team, index) in teamRows"
+              :key="team._key"
+              class="rounded-2xl border border-white/10 bg-slate-950/25 p-4"
+            >
+              <div class="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-medium text-white">
+                    {{ team.workspace_name || team.id || team.account_id || `Team #${index + 1}` }}
+                  </div>
+                  <div class="mt-1 text-xs text-slate-500">
+                    account_id 是 Team 调度和冷却隔离的主键；不要填个人账号邮箱。
+                  </div>
+                </div>
+                <button
+                  class="btn-secondary border-red-500/30 text-red-300 hover:border-red-400/40 hover:text-red-200"
+                  @click="removeTeamRow(index)"
+                >
+                  删除
+                </button>
+              </div>
+
+              <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">启用调度</span>
+                  <select v-model="team.enabled" class="input-dark">
+                    <option :value="true">启用</option>
+                    <option :value="false">停用</option>
+                  </select>
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">ChatGPT/OAuth active 保留数</span>
+                  <input v-model.number="team.max_chatgpt_active" type="number" min="1" max="5" class="input-dark" />
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">
+                    account_id <span class="text-red-400">*</span>
+                  </span>
+                  <input v-model.trim="team.account_id" type="text" placeholder="Team / workspace account_id" class="input-dark font-mono text-xs" />
+                  <span v-if="teamHasAnyValue(team) && !team.account_id" class="mt-2 block text-xs text-red-300">此项必填，否则保存会失败。</span>
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">显示名称</span>
+                  <input v-model.trim="team.workspace_name" type="text" placeholder="例如 Team A" class="input-dark" />
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">配置 ID（可选）</span>
+                  <input v-model.trim="team.id" type="text" placeholder="team-a" class="input-dark" />
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">指定 pending invite 邮箱（可选）</span>
+                  <input v-model.trim="team.pending_invite_email" type="email" placeholder="pending@example.com" class="input-dark" />
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">管理员邮箱（可选）</span>
+                  <input v-model.trim="team.email" type="email" placeholder="默认继承当前管理员邮箱" class="input-dark" />
+                </label>
+
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">独立 session_token（可选）</span>
+                  <input v-model.trim="team.session_token" type="password" placeholder="留空则共享默认管理员 session" class="input-dark font-mono text-xs" />
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <details class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <summary class="cursor-pointer text-sm font-medium text-slate-300">
+            JSON 源码（自动与上方表单同步）
+          </summary>
+          <textarea
+            v-model="runtimeForm.TEAM_WORKSPACES_JSON"
+            rows="10"
+            spellcheck="false"
+            :placeholder="teamJsonPlaceholder"
+            class="input-dark mt-4 font-mono text-xs"
+          ></textarea>
+        </details>
+
+        <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <p class="text-xs leading-6 text-slate-400">
+            保存后会立即热加载。多 Team 的 quota 缓存与 swap 冷却会按 account_id 隔离；disabled Team 不会参与自动调度。
+          </p>
+          <button
+            @click="saveRuntimeConfig"
+            :disabled="runtimeSaving || runtimeLoading"
+            class="btn-primary"
+          >
+            {{ runtimeSaving ? '保存中...' : '保存 Team 配置' }}
+          </button>
+        </div>
+      </div>
+
       <div v-else class="space-y-4">
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <div v-for="field in currentRuntimeFields" :key="field.key" class="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -426,7 +508,16 @@
               <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
               <span v-if="field.key === 'API_KEY'" class="ml-1 text-xs text-slate-500">（留空自动生成）</span>
             </label>
+            <textarea
+              v-if="fieldUsesTextarea(field.key)"
+              v-model="runtimeForm[field.key]"
+              rows="8"
+              spellcheck="false"
+              :placeholder="teamJsonPlaceholder"
+              class="input-dark font-mono text-xs"
+            ></textarea>
             <input
+              v-else
               v-model="runtimeForm[field.key]"
               :type="fieldInputType(field.key)"
               :placeholder="field.default || ''"
@@ -477,7 +568,7 @@
           </div>
           <h3 class="section-heading">源文件编辑</h3>
           <p class="section-subtitle">
-            直接编辑 .env 源文件。保存后会立即重载并校验邮箱服务 / 远端同步配置。
+            直接编辑 .env 源文件。保存后会立即重载并校验 CPA、邮箱服务和多 Team 配置。
           </p>
         </div>
         <div class="status-badge break-all font-mono text-[11px] text-slate-400">
@@ -546,7 +637,7 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
-  sync: [
+  cpa: [
     'SYNC_TARGET_CPA',
     'SYNC_TARGET_SUB2API',
     'CPA_URL',
@@ -566,24 +657,25 @@ const runtimeCategoryKeys = {
     'SUB2API_PROXY',
   ],
   proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
-  security: ['API_KEY'],
+  security: ['API_KEY', 'SWAP_SEAT_WHITELIST_EMAILS'],
+  teams: ['TEAM_WORKSPACES_JSON'],
 }
 
 const runtimeCategoryMeta = {
   cloudmail: {
     icon: '📧',
     badge: 'Mail Services',
-    title: '邮箱服务配置',
-    description: '配置自动注册和收验证码所需的邮箱后端。现在支持同时维护多个 CloudMail / Cloudflare Temp Email 实例，并指定默认新建服务。',
-    note: '已有账号会优先按账号自身保存的 mail_service_id 或唯一邮箱域名匹配服务；存在歧义时不会盲猜。',
-    footer: '邮箱服务配置保存后会立即热加载；之后的新建、复用和验证码轮询都会按最新服务列表执行。',
+    title: 'CFMail / 邮箱服务',
+    description: '配置消费 pending invite 时用来读取邀请邮件和验证码的 CFMail / Cloudflare Temp Email 服务。',
+    note: '支持多个服务和多域名；xxxxx.a.com、*.a.com、{random}.a.com 会在创建地址时启用随机子域名。CloudMail 仅保留兼容。',
+    footer: '邮箱配置保存后会立即热加载；pending invite 注册会按邮箱域名优先匹配对应服务。',
   },
-  sync: {
+  cpa: {
     icon: '☁️',
-    badge: 'Remote Sync',
-    title: '远端同步',
-    description: '先选择启用的远端同步目标，再填写对应的连接信息。账号池操作会根据这里的启用状态决定同步到哪些远端。',
-    note: '支持同时启用 CPA 和 Sub2API；界面只显示当前已启用目标的详细配置。',
+    badge: 'CPA Control',
+    title: 'CPA 管理端',
+    description: '配置 CPA_URL / CPA_KEY。AutoTeam 通过 CPA 读取 OAuth/auth-files、检查 quota，并启停 OAuth active/disabled。',
+    note: 'Sub2API / 旧同步字段已归档到折叠区；swap_seat 主流程不再维护本地账号池同步。',
   },
   proxy: {
     icon: '🛰️',
@@ -595,17 +687,26 @@ const runtimeCategoryMeta = {
   security: {
     icon: '🔐',
     badge: 'Security',
-    title: '安全 / 访问控制',
-    description: '入口级配置集中放在这里。API Key 决定 Web 面板和 HTTP API 的访问控制，不再和其他运行参数混在一起。',
-    note: '留空会自动生成新的 API Key；保存后前端会立即切换到新的密钥。',
-    footer: '这是控制面板和 API 的入口密钥。修改后会立即生效，并同步刷新当前浏览器里的 API Key。',
+    title: '安全 / 白名单',
+    description: '入口级 API Key 与 swap_seat 白名单集中放在这里。白名单成员不检查 quota、不切 seat、不启停 CPA OAuth。',
+    note: 'API Key 留空会自动生成新的密钥；SWAP_SEAT_WHITELIST_EMAILS 支持逗号、分号、空格或换行分隔。',
+    footer: '保存后会立即生效。修改 API Key 会同步刷新当前浏览器里的访问密钥。',
+  },
+  teams: {
+    icon: '🏢',
+    badge: 'Multi Team',
+    title: '多 Team 管理',
+    description: '配置多个 Team workspace 后，系统会逐个 Team 独立检查 quota、独立 swap_seat；该 Team 全员 quota 耗尽时才消费该 Team 的 pending invite。',
+    note: 'TEAM_WORKSPACES_JSON 支持 JSON 数组；每项至少需要 account_id，可选 workspace_name、session_token、email、max_chatgpt_active、pending_invite_email。',
+    footer: '留空时只管理当前管理员登录态绑定的 Team。多 Team 的冷却和 quota 缓存按 account_id 隔离，不会互相占用。',
   },
 }
 
 const visualCategories = [
-  { key: 'cloudmail', label: '邮箱服务', icon: '📧' },
-  { key: 'sync', label: '远端同步', icon: '☁️' },
+  { key: 'cloudmail', label: 'CFMail', icon: '📧' },
+  { key: 'cpa', label: 'CPA 管理', icon: '☁️' },
   { key: 'security', label: '安全 / 访问控制', icon: '🔐' },
+  { key: 'teams', label: '多 Team', icon: '🏢' },
   { key: 'admin', label: '管理员 / 主号', icon: '👤' },
   { key: 'auto-check', label: '巡检设置', icon: '🔄' },
   { key: 'source', label: '源文件编辑', icon: '📝' },
@@ -632,13 +733,17 @@ const sourceSaving = ref(false)
 const sourceLoaded = ref(false)
 const sourceMessage = ref('')
 const sourceMessageClass = ref('')
+const teamRows = ref([])
+const teamJsonError = ref('')
+let teamRowCounter = 0
+let syncingTeamJsonFromRows = false
 const runtimeRequiredKeys = new Set(['API_KEY'])
 const sub2apiFieldHints = {
   SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
   SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
   SUB2API_PASSWORD: 'ENV: SUB2API_PASSWORD · login.password',
   SUB2API_GROUP: 'ENV: SUB2API_GROUP · group_ids',
-  SUB2API_PROXY: 'ENV: SUB2API_PROXY · account.proxy_id（ID 或名称，仅账号池新建时写入）',
+  SUB2API_PROXY: 'ENV: SUB2API_PROXY · 旧账号池兼容字段，swap_seat 主流程不读取',
   SUB2API_CONCURRENCY: 'ENV: SUB2API_CONCURRENCY · account.concurrency',
   SUB2API_PRIORITY: 'ENV: SUB2API_PRIORITY · account.priority',
   SUB2API_RATE_MULTIPLIER: 'ENV: SUB2API_RATE_MULTIPLIER · account.rate_multiplier',
@@ -694,8 +799,8 @@ const mailServiceFieldMeta = {
       key: 'domain',
       label: '邮箱域名',
       required: true,
-      placeholder: 'mail.example.com',
-      hint: '用于自动匹配已有账号所属邮箱服务',
+      placeholder: 'xxxxx.a.com; xxxxx.b.com 或 *.a.com; *.b.com',
+      hint: '支持分号/逗号配置多域名；xxxxx.a.com、*.a.com、{random}.a.com 会为每次注册启用随机子域名。',
     },
   ],
 }
@@ -719,17 +824,17 @@ function fieldsByKeys(keys) {
 
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
 const proxyFields = computed(() => fieldsByKeys(runtimeCategoryKeys.proxy))
-const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
+const teamFields = computed(() => fieldsByKeys(runtimeCategoryKeys.teams))
 const defaultMailService = computed(() => mailServices.value.find(service => service.id === mailServiceDefault.value) || null)
 
-const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
-const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
-const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
-const syncSub2apiConnectionFields = computed(() => syncSub2apiEnabled.value
-  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
-  : [])
-const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
-  ? fieldsByKeys([
+const cpaFields = computed(() => fieldsByKeys(['CPA_URL', 'CPA_KEY']))
+const cpaArchivedFields = computed(() => fieldsByKeys([
+      'SYNC_TARGET_CPA',
+      'SYNC_TARGET_SUB2API',
+      'SUB2API_URL',
+      'SUB2API_EMAIL',
+      'SUB2API_PASSWORD',
+      'SUB2API_GROUP',
       'SUB2API_CONCURRENCY',
       'SUB2API_PRIORITY',
       'SUB2API_RATE_MULTIPLIER',
@@ -739,25 +844,22 @@ const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
       'SUB2API_OPENAI_PASSTHROUGH',
       'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
       'SUB2API_PROXY',
-    ])
-  : [])
+    ]))
 
 const currentRuntimeFields = computed(() => {
   if (selectedRuntimeCategory.value === 'security') {
     return securityFields.value
   }
+  if (selectedRuntimeCategory.value === 'teams') {
+    return teamFields.value
+  }
   return []
 })
 
-const enabledSyncTargetsText = computed(() => {
-  const targets = []
-  if (syncCpaEnabled.value) {
-    targets.push('CPA')
-  }
-  if (syncSub2apiEnabled.value) {
-    targets.push('Sub2API')
-  }
-  return targets.length ? `已启用：${targets.join(' + ')}` : '当前未启用远端'
+const cpaStatusText = computed(() => {
+  const hasUrl = String(runtimeForm.CPA_URL || '').trim()
+  const hasKey = String(runtimeForm.CPA_KEY || '').trim()
+  return hasUrl && hasKey ? 'CPA 已配置' : 'CPA 待配置'
 })
 
 const currentRuntimeStatus = computed(() => {
@@ -768,18 +870,9 @@ const currentRuntimeStatus = computed(() => {
     }
   }
 
-  if (selectedRuntimeCategory.value === 'sync') {
-    if (!syncCpaEnabled.value && !syncSub2apiEnabled.value) {
-      return {
-        label: '未启用',
-        class: 'border-white/10 bg-white/5 text-slate-400',
-      }
-    }
-
-    const cpaReady = !syncCpaEnabled.value || syncCpaFields.value.every(field => !isRuntimeRequired(field) || field.configured)
-    const sub2apiReady = !syncSub2apiEnabled.value || syncSub2apiConnectionFields.value.every(field => !isRuntimeRequired(field) || field.configured)
-
-    return cpaReady && sub2apiReady
+  if (selectedRuntimeCategory.value === 'cpa') {
+    const cpaReady = cpaFields.value.every(field => !isRuntimeRequired(field) || field.configured)
+    return cpaReady
       ? {
           label: '已配置',
           class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
@@ -827,6 +920,18 @@ const currentRuntimeStatus = computed(() => {
     }
   }
 
+  if (selectedRuntimeCategory.value === 'teams') {
+    return String(runtimeForm.TEAM_WORKSPACES_JSON || '').trim()
+      ? {
+          label: '多 Team',
+          class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
+        }
+      : {
+          label: '单 Team',
+          class: 'border-white/10 bg-white/5 text-slate-400',
+        }
+  }
+
   const fields = currentRuntimeFields.value
   const configured = fields.length > 0 && fields.every(field => !isRuntimeRequired(field) || field.configured)
 
@@ -870,6 +975,129 @@ function fieldInputType(key) {
   return key.includes('PASSWORD') || key.includes('KEY') ? 'password' : 'text'
 }
 
+const teamJsonPlaceholder = `[
+  {
+    "id": "team-a",
+    "account_id": "00000000-0000-0000-0000-000000000000",
+    "workspace_name": "Team A",
+    "max_chatgpt_active": 2
+  },
+  {
+    "id": "team-b",
+    "account_id": "11111111-1111-1111-1111-111111111111",
+    "workspace_name": "Team B",
+    "max_chatgpt_active": 1,
+    "pending_invite_email": "optional@example.com"
+  }
+]`
+
+function clampTeamActiveLimit(value) {
+  const n = Number.parseInt(value, 10)
+  if (Number.isNaN(n)) return 2
+  return Math.max(1, Math.min(5, n))
+}
+
+function createTeamRow(source = {}) {
+  teamRowCounter += 1
+  return {
+    _key: `team-${Date.now().toString(36)}-${teamRowCounter}`,
+    id: String(source.id || source.team_id || source.teamId || source.key || ''),
+    account_id: String(source.account_id || source.accountId || source.account || source.id || ''),
+    workspace_name: String(source.workspace_name || source.workspaceName || source.name || ''),
+    email: String(source.email || ''),
+    session_token: String(source.session_token || source.sessionToken || ''),
+    enabled: source.enabled === undefined ? true : Boolean(source.enabled),
+    max_chatgpt_active: clampTeamActiveLimit(source.max_chatgpt_active ?? source.target_seats ?? 2),
+    pending_invite_email: String(source.pending_invite_email || source.pendingInviteEmail || ''),
+  }
+}
+
+function teamHasAnyValue(team) {
+  return Boolean(
+    String(team?.id || '').trim() ||
+    String(team?.account_id || '').trim() ||
+    String(team?.workspace_name || '').trim() ||
+    String(team?.email || '').trim() ||
+    String(team?.session_token || '').trim() ||
+    String(team?.pending_invite_email || '').trim()
+  )
+}
+
+function parseTeamRowsFromJson(value) {
+  const text = String(value || '').trim()
+  if (!text) return []
+  const parsed = JSON.parse(text)
+  const rows = Array.isArray(parsed)
+    ? parsed
+    : parsed?.teams || parsed?.workspaces || parsed?.items || []
+  if (!Array.isArray(rows)) {
+    throw new Error('TEAM_WORKSPACES_JSON 必须是数组，或包含 teams/workspaces/items 数组')
+  }
+  return rows.filter(item => item && typeof item === 'object').map(item => createTeamRow(item))
+}
+
+function loadTeamRowsFromJson(showMessage = false) {
+  if (syncingTeamJsonFromRows) return
+  try {
+    teamRows.value = parseTeamRowsFromJson(runtimeForm.TEAM_WORKSPACES_JSON)
+    teamJsonError.value = ''
+    if (showMessage) {
+      setRuntimeMessage(teamRows.value.length ? `已载入 ${teamRows.value.length} 个 Team` : '已清空多 Team 配置')
+    }
+  } catch (e) {
+    teamJsonError.value = e.message
+  }
+}
+
+function teamRowsPayload() {
+  return teamRows.value
+    .filter(teamHasAnyValue)
+    .map(team => {
+      const item = {
+        account_id: String(team.account_id || '').trim(),
+        max_chatgpt_active: clampTeamActiveLimit(team.max_chatgpt_active),
+      }
+      const id = String(team.id || '').trim()
+      const workspaceName = String(team.workspace_name || '').trim()
+      const email = String(team.email || '').trim().toLowerCase()
+      const sessionToken = String(team.session_token || '').trim()
+      const pendingEmail = String(team.pending_invite_email || '').trim().toLowerCase()
+      if (id) item.id = id
+      if (workspaceName) item.workspace_name = workspaceName
+      if (team.enabled === false) item.enabled = false
+      if (email) item.email = email
+      if (sessionToken) item.session_token = sessionToken
+      if (pendingEmail) item.pending_invite_email = pendingEmail
+      return item
+    })
+}
+
+function syncTeamRowsToJson() {
+  const rows = teamRowsPayload()
+  syncingTeamJsonFromRows = true
+  runtimeForm.TEAM_WORKSPACES_JSON = rows.length ? JSON.stringify(rows, null, 2) : ''
+  teamJsonError.value = ''
+  window.setTimeout(() => {
+    syncingTeamJsonFromRows = false
+  }, 0)
+}
+
+function addTeamRow() {
+  teamRows.value = [...teamRows.value, createTeamRow({ max_chatgpt_active: 2 })]
+}
+
+function removeTeamRow(index) {
+  teamRows.value = teamRows.value.filter((_, i) => i !== index)
+}
+
+function reloadTeamRowsFromJson() {
+  loadTeamRowsFromJson(true)
+}
+
+function fieldUsesTextarea(key) {
+  return key === 'TEAM_WORKSPACES_JSON'
+}
+
 function isToggleField(key) {
   return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API'
 }
@@ -896,7 +1124,7 @@ function fieldInputStep(key) {
   return undefined
 }
 
-function createMailService(type = 'cloudmail') {
+function createMailService(type = 'cloudflare_temp_email') {
   const normalizedType = String(type || '').toLowerCase() === 'cloudflare_temp_email'
     ? 'cloudflare_temp_email'
     : 'cloudmail'
@@ -1029,6 +1257,7 @@ async function loadRuntimeConfig() {
     for (const field of runtimeFields.value) {
       runtimeForm[field.key] = normalizeRuntimeFieldValue(field)
     }
+    loadTeamRowsFromJson(false)
   } catch (e) {
     console.error('加载运行时配置失败:', e)
     setRuntimeMessage('加载运行时配置失败: ' + e.message, 'error')
@@ -1041,10 +1270,19 @@ async function saveRuntimeConfig() {
   runtimeSaving.value = true
   runtimeSaved.value = false
   try {
+    if (selectedRuntimeCategory.value === 'teams') {
+      syncTeamRowsToJson()
+    }
     const payload = {}
     for (const field of runtimeFields.value) {
       const value = runtimeForm[field.key]
       payload[field.key] = value == null ? '' : String(value)
+    }
+    if (String(payload.CPA_URL || '').trim() || String(payload.CPA_KEY || '').trim()) {
+      payload.SYNC_TARGET_CPA = 'true'
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'SYNC_TARGET_SUB2API') && !String(payload.SYNC_TARGET_SUB2API || '').trim()) {
+      payload.SYNC_TARGET_SUB2API = 'false'
     }
     const sanitizedServices = mailServices.value.map(service => sanitizeMailService(service))
     const sanitizedDefault = sanitizedServices.some(service => service.id === mailServiceDefault.value)
@@ -1107,6 +1345,19 @@ watch(visualCategory, async (next) => {
     await loadSourceConfig()
   }
 })
+
+watch(
+  () => runtimeForm.TEAM_WORKSPACES_JSON,
+  () => {
+    if (!syncingTeamJsonFromRows) {
+      loadTeamRowsFromJson(false)
+    }
+  },
+)
+
+watch(teamRows, () => {
+  syncTeamRowsToJson()
+}, { deep: true })
 
 onMounted(async () => {
   await loadRuntimeConfig()

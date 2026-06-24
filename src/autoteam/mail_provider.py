@@ -130,7 +130,7 @@ def _service_dict_from_legacy(
 
 def _legacy_mail_services(env: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     source = env or os.environ
-    selected = normalize_mail_provider(source.get("MAIL_PROVIDER"), default=MAIL_PROVIDER_CLOUDMAIL)
+    selected = normalize_mail_provider(source.get("MAIL_PROVIDER"), default=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
     ordered_types = [selected] + [provider for provider in SUPPORTED_MAIL_PROVIDERS if provider != selected]
     services = []
     for provider in ordered_types:
@@ -290,7 +290,7 @@ def get_mail_provider_name(env: dict[str, Any] | None = None) -> str:
     if default_service:
         return normalize_mail_provider(default_service.get("type"))
     source = env or os.environ
-    return normalize_mail_provider(source.get("MAIL_PROVIDER"))
+    return normalize_mail_provider(source.get("MAIL_PROVIDER"), default=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
 
 
 def get_mail_domain(provider: str | None = None, env: dict[str, Any] | None = None) -> str:

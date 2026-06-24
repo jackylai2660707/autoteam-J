@@ -31,6 +31,174 @@ def list_cpa_files():
     return data.get("files", [])
 
 
+def _cpa_base_url():
+    return (CPA_URL or "").rstrip("/")
+
+
+def _cpa_auth_identifier(auth_entry: dict | None) -> str:
+    """返回 CPA management API 可接受的 auth 标识，优先用 name。"""
+    auth_entry = auth_entry or {}
+    for key in ("name", "id"):
+        value = str(auth_entry.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _cpa_auth_index(auth_entry: dict | None) -> str:
+    """返回 /api-call 所需的 auth_index。"""
+    auth_entry = auth_entry or {}
+    for key in ("auth_index", "authIndex", "AuthIndex"):
+        value = str(auth_entry.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def is_cpa_codex_oauth(auth_entry: dict | None) -> bool:
+    """判断 CPA auth-files 条目是否是 Codex OAuth 账号。"""
+    auth_entry = auth_entry or {}
+    provider = str(auth_entry.get("provider") or auth_entry.get("type") or "").strip().lower()
+    if provider and provider != "codex":
+        return False
+    email = str(auth_entry.get("email") or auth_entry.get("account") or "").strip()
+    return bool(email)
+
+
+def cpa_auth_is_active(auth_entry: dict | None) -> bool:
+    """CPA 侧 OAuth 是否处于可调度 active 状态。"""
+    auth_entry = auth_entry or {}
+    status = str(auth_entry.get("status") or "").strip().lower()
+    return not bool(auth_entry.get("disabled", False)) and status == "active"
+
+
+def set_cpa_auth_disabled(auth_entry_or_name, disabled: bool):
+    """通过 CPA management API 启用/禁用单个 OAuth/auth-file。"""
+    if isinstance(auth_entry_or_name, dict):
+        name = _cpa_auth_identifier(auth_entry_or_name)
+    else:
+        name = str(auth_entry_or_name or "").strip()
+    if not name:
+        raise ValueError("CPA auth name/id 为空")
+
+    resp = requests.patch(
+        f"{_cpa_base_url()}/v0/management/auth-files/status",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json={"name": name, "disabled": bool(disabled)},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"CPA auth 状态更新失败: HTTP {resp.status_code} {resp.text[:200]}")
+    try:
+        return resp.json()
+    except Exception:
+        return {"status": "ok", "disabled": bool(disabled)}
+
+
+def cpa_api_call(auth_entry_or_index, method: str, url: str, *, headers: dict | None = None, data: str = ""):
+    """调用 CPA /v0/management/api-call，用 CPA 内的 OAuth 代发请求。"""
+    if isinstance(auth_entry_or_index, dict):
+        auth_index = _cpa_auth_index(auth_entry_or_index)
+    else:
+        auth_index = str(auth_entry_or_index or "").strip()
+    if not auth_index:
+        raise ValueError("CPA auth_index 为空，无法通过 api-call 检查 quota")
+
+    payload = {
+        "auth_index": auth_index,
+        "method": method,
+        "url": url,
+        "header": headers or {},
+    }
+    if data:
+        payload["data"] = data
+
+    resp = requests.post(
+        f"{_cpa_base_url()}/v0/management/api-call",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=payload,
+        timeout=70,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"CPA api-call 失败: HTTP {resp.status_code} {resp.text[:200]}")
+    return resp.json()
+
+
+def parse_codex_quota_usage(data: dict | str):
+    """
+    解析 ChatGPT /backend-api/wham/usage 的 rate_limit。
+
+    返回值与 autoteam.codex_auth.check_codex_quota 保持一致：
+    ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
+    quota_info 同时包含 5h(primary) 和 weekly(secondary) 窗口。
+    """
+    from autoteam.codex_auth import get_quota_exhausted_info
+
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return "auth_error", None
+    if not isinstance(data, dict):
+        return "auth_error", None
+
+    rate_limit = data.get("rate_limit") or {}
+    if not isinstance(rate_limit, dict):
+        return "auth_error", None
+
+    primary = rate_limit.get("primary_window") or {}
+    secondary = rate_limit.get("secondary_window") or {}
+
+    def _num(value, default=0):
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+    quota_info = {
+        "primary_pct": _num(primary.get("used_percent", 0)),
+        "primary_resets_at": _num(primary.get("reset_at", 0)),
+        "weekly_pct": _num(secondary.get("used_percent", 0)),
+        "weekly_resets_at": _num(secondary.get("reset_at", 0)),
+    }
+
+    exhausted_info = get_quota_exhausted_info(quota_info, limit_reached=bool(rate_limit.get("limit_reached")))
+    if exhausted_info:
+        return "exhausted", exhausted_info
+    return "ok", quota_info
+
+
+def check_cpa_codex_quota(auth_entry: dict, account_id: str | None = None):
+    """只通过 CPA API 检查某个 Codex OAuth 的 5h/weekly quota。"""
+    request_headers = {
+        "Authorization": "Bearer $TOKEN$",
+        "Content-Type": "application/json",
+    }
+    if account_id:
+        request_headers["Chatgpt-Account-Id"] = account_id
+
+    try:
+        result = cpa_api_call(
+            auth_entry,
+            "GET",
+            "https://chatgpt.com/backend-api/wham/usage",
+            headers=request_headers,
+        )
+    except Exception as exc:
+        logger.warning("[CPA] quota 检查失败: %s (%s)", _cpa_auth_identifier(auth_entry), exc)
+        return "auth_error", {"error": str(exc)}
+
+    status_code = int(result.get("status_code") or result.get("statusCode") or 0)
+    body = result.get("body") or ""
+    if status_code in (401, 403):
+        return "auth_error", {"status_code": status_code, "body": body[:200]}
+    if status_code != 200:
+        logger.warning("[CPA] wham/usage 异常: HTTP %d %s", status_code, str(body)[:200])
+        return "auth_error", {"status_code": status_code, "body": str(body)[:200]}
+
+    return parse_codex_quota_usage(body)
+
+
 def upload_to_cpa(filepath):
     """上传认证文件到 CPA"""
     filepath = Path(filepath)
@@ -125,7 +293,7 @@ def _parse_jwt_payload(token):
 
 
 def _bundle_from_auth_data(auth_data, fallback_name=""):
-    id_token = auth_data.get("id_token", "")
+    id_token = auth_data.get("id_token") or ""
     claims = _parse_jwt_payload(id_token) if id_token else {}
     auth_claims = claims.get("https://api.openai.com/auth", {}) if isinstance(claims, dict) else {}
 
@@ -146,8 +314,13 @@ def _bundle_from_auth_data(auth_data, fallback_name=""):
         "account_id": auth_data.get("account_id", ""),
         "email": auth_data.get("email", ""),
         "plan_type": plan_type,
-        "expired": _parse_expired_timestamp(auth_data.get("expired")),
+        "expired": _parse_expired_timestamp(auth_data.get("expired") or auth_data.get("expires_at")),
         "last_refresh_ts": _parse_optional_timestamp(auth_data.get("last_refresh")),
+        # 新版 userscript 导出的 Codex Access Token 在 headers.authorization 里；
+        # 归一化/反向同步时必须原样保留，否则会退回旧 OAuth access_token 格式导致 CPA 不可用。
+        "headers": auth_data.get("headers") if isinstance(auth_data.get("headers"), dict) else {},
+        "disabled": bool(auth_data.get("disabled", False)),
+        "websockets": bool(auth_data.get("websockets", True)),
     }
 
 
@@ -170,10 +343,13 @@ def _auth_identity(bundle, main=False):
 
 def _candidate_score(auth_data, bundle, name, main=False):
     canonical_name = _normalized_auth_path(bundle, main=main).name
+    headers = auth_data.get("headers") if isinstance(auth_data.get("headers"), dict) else {}
+    header_authorization = str(headers.get("authorization") or headers.get("Authorization") or "")
     return (
         1 if name == canonical_name else 0,
         bundle.get("last_refresh_ts", _parse_optional_timestamp(auth_data.get("last_refresh"))),
         _parse_expired_timestamp(auth_data.get("expired")),
+        len(header_authorization),
         len(auth_data.get("refresh_token") or ""),
     )
 
@@ -182,14 +358,19 @@ def _write_auth_file(filepath, bundle):
     ensure_auth_dir()
     auth_data = {
         "type": "codex",
-        "id_token": bundle.get("id_token", ""),
+        "id_token": bundle.get("id_token") or None,
         "access_token": bundle.get("access_token", ""),
-        "refresh_token": bundle.get("refresh_token", ""),
+        "refresh_token": bundle.get("refresh_token") or None,
         "account_id": bundle.get("account_id", ""),
         "email": bundle.get("email", ""),
         "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle.get("expired", 0))),
         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle.get("last_refresh_ts", time.time()))),
     }
+    headers = bundle.get("headers") if isinstance(bundle.get("headers"), dict) else {}
+    if headers:
+        auth_data["headers"] = headers
+    auth_data["disabled"] = bool(bundle.get("disabled", False))
+    auth_data["websockets"] = bool(bundle.get("websockets", True))
     write_text(filepath, json.dumps(auth_data, indent=2))
     ensure_auth_file_permissions(filepath)
     return filepath
@@ -348,7 +529,7 @@ def sync_from_cpa():
     candidates = []
     for item in cpa_files:
         name = (item.get("name") or "").strip()
-        if not name or not name.endswith(".json") or not name.startswith("codex-"):
+        if not name or not name.endswith(".json"):
             skipped += 1
             continue
 

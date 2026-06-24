@@ -57,15 +57,29 @@ def _extract_remote_cleanup_errors(results):
     return errors
 
 
-def fetch_team_state(chatgpt_api):
-    """读取 Team 成员和邀请状态。"""
-    account_id = get_chatgpt_account_id()
-    members = []
-    invites = []
+def _resolve_account_id(chatgpt_api=None, account_id=None):
+    resolved = str(account_id or getattr(chatgpt_api, "account_id", "") or "").strip()
+    resolved = resolved or get_chatgpt_account_id()
+    if resolved and chatgpt_api is not None and hasattr(chatgpt_api, "account_id"):
+        try:
+            chatgpt_api.account_id = resolved
+        except Exception:
+            pass
+    return resolved
 
+
+def fetch_team_members(chatgpt_api, account_id=None):
+    """只读 Team 成员列表；不读取/处理 invite。"""
+    account_id = _resolve_account_id(chatgpt_api, account_id)
     users_resp = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/users")
     data = _parse_team_api_json(users_resp, "Team 成员")
-    members = data.get("items", data.get("users", data.get("members", [])))
+    return data.get("items", data.get("users", data.get("members", [])))
+
+
+def fetch_team_state(chatgpt_api, account_id=None):
+    """读取 Team 成员和邀请状态（只读；保留给展示页兼容）。"""
+    account_id = _resolve_account_id(chatgpt_api, account_id)
+    members = fetch_team_members(chatgpt_api, account_id=account_id)
 
     invites_resp = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/invites")
     data = _parse_team_api_json(invites_resp, "Team 邀请")
@@ -84,128 +98,5 @@ def delete_managed_account(
     mail_client=None,
     remote_state=None,
 ):
-    """
-    删除本地管理账号及其衍生资源。
-    返回 cleanup 摘要，设计为幂等操作。
-    """
-    email_l = email.lower()
-    accounts = load_accounts()
-    acc = find_account(accounts, email)
-
-    cleanup = {
-        "local_record": False,
-        "local_auth_files": [],
-        "cpa_files": [],
-        "sub2api_accounts": [],
-        "remote_errors": {},
-        "team_member_removed": False,
-        "invite_removed": False,
-        "cloudmail_deleted": False,
-    }
-
-    members = []
-    invites = []
-    own_chatgpt = None
-    own_mail_client = None
-
-    try:
-        account_id = get_chatgpt_account_id()
-        if remove_remote:
-            if remote_state is not None:
-                members, invites = remote_state
-            else:
-                if chatgpt_api is None:
-                    from autoteam.chatgpt_api import ChatGPTTeamAPI
-
-                    own_chatgpt = ChatGPTTeamAPI()
-                    own_chatgpt.start()
-                    chatgpt_api = own_chatgpt
-                members, invites = fetch_team_state(chatgpt_api)
-
-            member_matches = [m for m in members if (m.get("email", "") or "").lower() == email_l]
-            for member in member_matches:
-                user_id = member.get("user_id") or member.get("id")
-                if not user_id:
-                    continue
-                result = chatgpt_api._api_fetch(
-                    "DELETE",
-                    f"/backend-api/accounts/{account_id}/users/{user_id}",
-                )
-                if result["status"] not in (200, 204):
-                    raise RuntimeError(f"移除 Team 成员失败: {email}")
-                cleanup["team_member_removed"] = True
-
-            invite_matches = []
-            for inv in invites:
-                inv_email = (inv.get("email_address") or inv.get("email") or "").lower()
-                if inv_email == email_l:
-                    invite_matches.append(inv)
-
-            for inv in invite_matches:
-                invite_id = inv.get("id")
-                if not invite_id:
-                    continue
-                result = chatgpt_api._api_fetch(
-                    "DELETE",
-                    f"/backend-api/accounts/{account_id}/invites/{invite_id}",
-                )
-                if result["status"] not in (200, 204):
-                    raise RuntimeError(f"取消 Team 邀请失败: {email}")
-                cleanup["invite_removed"] = True
-
-        auth_candidates = set()
-        if acc and acc.get("auth_file"):
-            auth_candidates.add(Path(acc["auth_file"]))
-        auth_candidates.update(AUTH_DIR.glob(f"codex-{email}-*.json"))
-
-        for path in sorted(auth_candidates):
-            if path.exists():
-                path.unlink()
-                cleanup["local_auth_files"].append(path.name)
-                logger.info("[账号] 已删除本地 auth: %s", path.name)
-
-        remote_cleanup = delete_account_from_configured_targets(
-            email,
-            auth_names=list(cleanup["local_auth_files"]),
-            include_disabled=True,
-        )
-        cleanup["cpa_files"] = list((remote_cleanup.get("cpa") or {}).get("deleted", []))
-        cleanup["sub2api_accounts"] = list((remote_cleanup.get("sub2api") or {}).get("deleted", []))
-        cleanup["remote_errors"] = _extract_remote_cleanup_errors(remote_cleanup)
-
-        if acc:
-            accounts = [item for item in accounts if item["email"].lower() != email_l]
-            save_accounts(accounts)
-            cleanup["local_record"] = True
-            logger.info("[账号] 已删除本地记录: %s", email)
-
-            mail_account_id = get_account_mail_account_id(acc)
-            if remove_cloudmail and mail_account_id is not None:
-                try:
-                    expected_service_id = get_account_mail_service_id(acc)
-                    provider = get_account_mail_provider(acc)
-                    current_service_id = str(getattr(mail_client, "service_id", None) or "").strip()
-                    current_provider = str(getattr(mail_client, "provider_name", "") or "").strip()
-                    needs_new_client = mail_client is None
-                    if not needs_new_client and expected_service_id:
-                        needs_new_client = current_service_id != expected_service_id
-                    elif not needs_new_client:
-                        needs_new_client = current_provider != provider
-
-                    if needs_new_client:
-                        own_mail_client = get_mail_client_for_account(acc)
-                        own_mail_client.login()
-                        mail_client = own_mail_client
-                    resp = mail_client.delete_account(mail_account_id)
-                    if resp.get("code") == 200:
-                        cleanup["cloudmail_deleted"] = True
-                except Exception as exc:
-                    logger.warning("[账号] 删除邮箱提供者账户失败: %s", exc)
-
-        if sync_cpa_after:
-            sync_to_cpa()
-
-        return cleanup
-    finally:
-        if own_chatgpt:
-            own_chatgpt.stop()
+    """swap_seat-only 模式下禁用账号删除/Team member 移除。"""
+    raise RuntimeError("swap_seat-only 模式已禁用账号删除/Team member 移除；请只执行 swap_seat")

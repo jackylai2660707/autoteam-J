@@ -158,6 +158,8 @@ class ManualAccountFlow:
         self._finalized = False
 
     def start(self):
+        raise RuntimeError("swap_seat-only 模式已禁用 AutoTeam 手动 OAuth；请在 CPA 管理 OAuth/auth")
+
         try:
             self._server = _OAuthCallbackServer(self)
             self._server.start()
@@ -187,6 +189,8 @@ class ManualAccountFlow:
             logger.info("[手动添加] 已收到%s回调", "自动" if source == "auto" else "手动")
 
     def submit_callback(self, callback_url):
+        raise RuntimeError("swap_seat-only 模式已禁用 AutoTeam 手动 OAuth；请在 CPA 管理 OAuth/auth")
+
         self.record_callback(callback_url, source="manual")
         self.maybe_finalize()
         return self.status()

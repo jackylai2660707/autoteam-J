@@ -29,7 +29,7 @@ STARTUP_REQUIRED_CONFIGS = [
 
 # 可在配置面板中编辑的配置项（key, 提示, 默认值, 是否可选）
 REQUIRED_CONFIGS = [
-    ("MAIL_PROVIDER", "邮箱服务提供者（cloudmail/cloudflare_temp_email）", "cloudmail", True),
+    ("MAIL_PROVIDER", "邮箱服务提供者（cloudmail/cloudflare_temp_email）", MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL, True),
     ("MAIL_SERVICES_JSON", "邮箱服务列表 JSON（内部使用）", "", True),
     ("MAIL_SERVICE_DEFAULT", "默认新建邮箱服务 ID（内部使用）", "", True),
     ("CLOUDMAIL_BASE_URL", "CloudMail API 地址", "", True),
@@ -38,7 +38,12 @@ REQUIRED_CONFIGS = [
     ("CLOUDMAIL_DOMAIN", "CloudMail 邮箱域名（如 @example.com）", "", True),
     ("CF_TEMP_EMAIL_BASE_URL", "Cloudflare Temp Email 地址", "", True),
     ("CF_TEMP_EMAIL_ADMIN_PASSWORD", "Cloudflare Temp Email 管理密码", "", True),
-    ("CF_TEMP_EMAIL_DOMAIN", "Cloudflare Temp Email 邮箱域名（如 example.com）", "", True),
+    (
+        "CF_TEMP_EMAIL_DOMAIN",
+        "Cloudflare Temp Email 邮箱域名（支持 example.com、{random}.a.com;{random}.b.com、*.a.com;*.b.com）",
+        "",
+        True,
+    ),
     ("SYNC_TARGET_CPA", "启用 CPA 同步（true/false）", "", True),
     ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", True),
     ("CPA_KEY", "CPA 管理密钥", "", True),
@@ -56,6 +61,9 @@ REQUIRED_CONFIGS = [
     ("SUB2API_OPENAI_WS_MODE", "Sub2API OpenAI WS 模式（off/ctx_pool/passthrough）", "off", True),
     ("SUB2API_OPENAI_PASSTHROUGH", "Sub2API OpenAI passthrough（true/false）", "false", True),
     ("SUB2API_OVERWRITE_ACCOUNT_SETTINGS", "Sub2API 同步时覆盖账号默认设置（true/false）", "false", True),
+    ("AUTO_CHECK_REPLACE_WITH_PENDING_INVITE", "自动巡检无可用 quota 时消费 pending invite（true/false）", "false", True),
+    ("SWAP_SEAT_WHITELIST_EMAILS", "swap_seat 白名单邮箱（逗号/分号/换行分隔，不查 quota、不切 seat）", "", True),
+    ("TEAM_WORKSPACES_JSON", "多 Team 工作区 JSON（可选）", "", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),

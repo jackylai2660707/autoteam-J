@@ -1,207 +1,106 @@
 # 常见问题
 
-## 安装相关
+## swap_seat 没有执行任何切换
 
-### Playwright 安装失败
+可能原因：
 
-```bash
-uv run playwright install chromium
-uv run playwright install-deps chromium
-```
+1. 没有任何成员同时具备 5h + weekly quota。
+2. 当前 seat/OAuth 已经是目标状态。
+3. 命中了 2 小时 / 每日 3 次冷却。
+4. 成员在白名单里。
+5. CPA 没有对应邮箱的 Codex OAuth/auth-file。
 
-### macOS 上 Playwright Sync API 报错
+查看位置：
 
-```text
-playwright._impl._errors.Error: It looks like you are using Playwright Sync API inside the asyncio loop.
-```
+- WebUI → Seat 调度 → quota cache / cooldown
+- WebUI → 任务历史
+- WebUI → 日志
 
-设置环境变量：
+## 为什么 quota 明明恢复了仍不检查？
 
-```bash
-export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
-uv run autoteam rotate
-```
+AutoTeam 会记录 exhausted 的 reset 时间。未到 reset 前不会重复检查，避免无用 CPA 调用和无用 swap。
 
-### Windows 启动时出现编码报错
+如果确认 reset 时间已经过了但仍未检查：
 
-如果历史 `.env` 文件含有 GBK / ANSI 编码或旧版内联注释格式，建议：
+- 查看 `swap_seat_quota_state.json` 中该账号的 `exhausted_until`。
+- 确认 Team `account_id` 是否正确；quota cache 按 `account_id + auth_id` 隔离。
 
-1. 将 `.env` 保存为 UTF-8
-2. 确认配置值格式为：
+## 新账号为什么没有立刻切上来？
 
-```env
-AUTO_CHECK_INTERVAL=300  # 5 分钟
-```
+新账号必须满足：
 
-新版本已兼容 UTF-8 与尾部注释。
+1. 已加入 Team member 列表。
+2. CPA 中已经出现该邮箱的 Codex OAuth/auth-file。
+3. CPA quota 检查显示 5h 和 weekly 都有剩余。
+4. 预切旧成员 Codex 成功，未超过 ChatGPT active 上限。
 
-## 登录相关
+## pending invite 没有被消费
 
-### Codex OAuth 登录失败：未获取到 authorization code
+只有这些条件同时满足才会消费：
 
-常见原因：
-1. **IP 被标记** — VPS 的 IP 被 OpenAI/Cloudflare 拦截，建议换住宅代理
-2. **Cloudflare 验证** — 浏览器环境被检测，需更新 Chromium 或切换网络
-3. **workspace 选择失败** — 页面结构变化，查看 `screenshots/codex_04_*.png`
-4. **自动回调不可达** — 如果浏览器和 AutoTeam 不在同一台机器，`localhost:1455` 回调可能不会到达 AutoTeam，此时请改用手动粘贴回调 URL
-5. **本地回调被代理拦截** — 如果启用了 `PLAYWRIGHT_PROXY_URL`，建议同时设置 `PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1`
+- 当前 Team 所有非白名单成员 quota 都耗尽。
+- 操作开启 `replace_with_pending_invite`。
+- Team pending invite 列表中有 CFMail 邮箱。
+- 可以从 CFMail 读取 invite 邮件。
+- 注册前旧成员能预切 Codex。
 
-### 登录后 plan 显示 free 而不是 team
+AutoTeam 不会创建新的 invite，也不会取消已有 invite。
 
-通常是 `state.json` 中的 `workspace_name` 或 `account_id` 不正确。
+## 手动 enable CPA OAuth 报 410
+
+这是预期行为。手动 API 只允许 disable。enable 必须由 `swap_seat` 根据 quota 和 active 保留数自动选择，避免启用已耗尽账号或超过 active 上限。
+
+## 多 Team 操作到了错误 Team
 
 检查：
 
-```bash
-cat state.json | python -m json.tool
-```
+- `TEAM_WORKSPACES_JSON` 的 `account_id` 是否是 Team/workspace ID，不是个人邮箱。
+- 如果每个 Team 需要独立管理员 session，请填写对应 `session_token`。
+- WebUI 单 Team 操作必须先选择目标 Team。
+- 多 Team 自动调度只处理 `enabled=true` 的 Team。
 
-确认：
-- `account_id` 是有效 UUID
-- `workspace_name` 是 Team 名称
+## 为什么 admin / 母号变成 Codex seat？
 
-### 验证码一直获取失败
+这是当前策略：母号/admin 默认不占 ChatGPT active 席位，保持 Codex seat。如果不希望 AutoTeam 管理某个账号，把它加入 `SWAP_SEAT_WHITELIST_EMAILS`。
 
-- 检查当前邮箱服务是否正常
-- 如果使用 CloudMail：检查 `CLOUDMAIL_DOMAIN`
-- 如果使用 Cloudflare Temp Email：检查 `CF_TEMP_EMAIL_BASE_URL`、`CF_TEMP_EMAIL_ADMIN_PASSWORD`、`CF_TEMP_EMAIL_DOMAIN`
-- 系统会按 **邮件 ID** 跳过已经尝试过的验证码邮件，而不是按 6 位数字去重
-- 如果浏览器长时间停在 `email-verification`，通常说明新的验证码邮件没有到达，或拿到的是旧邮件
+## 如何确认不会 kick 成员？
 
-## 轮转相关
-
-### rotate 没有补号
-
-先看 `get_team_member_count` 是否失败。若返回 `-1`，说明 Team API 调用异常：
-
-- 确认管理员已登录（`state.json` 有 session token）
-- 确认 `account_id` 是有效 UUID
-
-### rotate 的目标人数为什么算不准
-
-`rotate 5` / `fill 5` 中的 `5` 指的是 **Team 总人数目标**。
-
-也就是说：
-- owner
-- 外部成员
-- 本地管理成员
-
-都会一起计入这 5 个席位。
-
-### 旧号一直被复用但额度不够
-
-旧号复用前会先验证额度。
-
-如果验证返回 `auth_error`（token 失效），系统会参考：
-- `last_quota`
-- `quota_resets_at`
-
-判断是否值得继续复用。5h 重置时间过后，旧数据会视为过期。
-
-### Team 超员但没有清理
-
-`rotate` 会自动清理超员成员。如果没生效，可手动执行：
+运行：
 
 ```bash
-uv run autoteam cleanup 5
+rg -n "DELETE.*users|POST.*invites|PATCH.*/invites|kick|remove" src/autoteam web/src tests/unit -S --glob "!src/autoteam/web/dist/**"
 ```
 
-## CPA 同步相关
+预期只应看到：
 
-### 反向同步后本地 token 似乎“变旧了”
+- 禁用文案
+- 安全闸
+- 测试断言
 
-新版本会比较本地与 CPA 两侧文件的：
+真正的 Team API 写操作只允许 `PATCH /users/{id}` 修改 `seat_type`。
 
-- `last_refresh`
-- `expired`
+## WebUI 进不去
 
-只有 CPA 文件更“新”时，才会覆盖本地文件。
+- 检查 `API_KEY`。
+- 检查服务是否在运行：`uv run autoteam api` 或 `docker compose logs -f autoteam`。
+- 如果反向代理，确认 `Authorization: Bearer <API_KEY>` 没被代理剥离。
 
-如果你怀疑历史版本已经把旧 token 写回本地，可以先重新登录目标账号，再执行：
+## CPA 连接失败
 
-```bash
-uv run autoteam pull-cpa
-```
+- 确认 `CPA_URL` 从 AutoTeam 所在环境可访问。
+- Docker 下如果 CPA 在宿主机，可能要用 `host.docker.internal` 或宿主机网关 IP。
+- 确认 `CPA_KEY` 与 CPA 管理密钥一致。
 
-查看日志里的：
-- `local_kept_newer`
-- `cpa_duplicates_deleted`
-- `local_duplicates_deleted`
+## Cloudflare Temp Email 连接失败
 
-### 同账号在 CPA / 本地出现多个文件名不同的认证文件
+- `CF_TEMP_EMAIL_BASE_URL` 要填 API 根地址，不是前端页面。
+- `CF_TEMP_EMAIL_ADMIN_PASSWORD` 要与服务端管理密码一致。
+- `CF_TEMP_EMAIL_DOMAIN` 要是该服务可创建/接收邮件的域名。
 
-新版本会在同步时按同账号去重：
+## 什么时候会消耗 swap 冷却？
 
-- CPA 侧只保留一份
-- 本地也只保留一份
-- 并统一重写为本地命名规范
+只有实际执行 seat/OAuth 副作用前才占用冷却。以下情况不消耗：
 
-如果你怀疑之前版本遗留了重复文件，执行一次：
-
-```bash
-uv run autoteam pull-cpa
-```
-
-## Docker 相关
-
-### 容器一直重启
-
-```bash
-docker compose logs
-```
-
-通常是配置缺失或连通性验证失败。
-
-### `data` 目录没有写权限
-
-入口脚本会自动 `chmod -R 777 /app/data`。若仍有问题：
-
-```bash
-sudo chmod -R 777 data/
-```
-
-### 重建容器后配置丢失
-
-确认 `docker-compose.yml` 中有：
-
-```yaml
-volumes:
-  - ./data:/app/data
-```
-
-### 容器里访问不到宿主机 SOCKS5 代理
-
-如果代理在宿主机上，比如 `host.docker.internal:1080`，请先确认容器内可以解析并访问宿主机代理地址；不同 Docker / Podman 环境的宿主机别名配置方式可能不同。
-
-然后在 `data/.env` 中配置：
-
-```dotenv
-PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
-PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
-```
-
-如果代理需要认证，建议改用 HTTP 代理：
-
-```dotenv
-PLAYWRIGHT_PROXY_URL=http://username:password@host.docker.internal:1080
-```
-
-> 注意：Playwright / Chromium 不支持带认证的 socks5，因此不要写成 `socks5://username:password@host:port`。
-
-## Web 面板相关
-
-### 页面显示 `JSON parse error`
-
-说明后端返回了非 JSON 响应（通常是 500 错误）。查看后端日志定位具体异常。
-
-### 操作按钮全部禁用
-
-轮转 / 补满 / 清理等账号池操作需要先在「配置面板 → 管理员 / 主号」完成管理员登录。
-
-### Team 成员页的 owner 为什么没有“移出”按钮
-
-`account-owner` 角色不会显示“移出”按钮，因为这类账号通常无法通过普通成员删除接口移出。
-
-### 刷新后数据没更新
-
-点击侧边栏底部的「刷新数据」按钮手动刷新。
+- 没有可用 quota，返回 `no_quota_available`。
+- 当前状态已经符合目标，返回 `no_changes_needed`。
+- 只读取 runtime status / quota cache。

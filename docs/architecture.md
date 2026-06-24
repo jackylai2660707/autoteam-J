@@ -1,151 +1,109 @@
 # 工作原理
 
-## 总体目标
+AutoTeam 当前架构是 `swap_seat-only`。它不再是旧账号池轮转器，而是一个围绕 CPA quota 与 Team seat 的调度控制台。
 
-AutoTeam 的目标不是单纯“多开号”，而是：
+## 组件
 
-1. 维护 **Team 总人数** 在目标值附近
-2. 让 active 账号尽量保持可用额度
-3. 将可用认证文件同步到已启用远端（CPA / Sub2API）
-4. 在需要时从 CPA 反向恢复认证文件到本地
-
-## 轮转流程
-
-```text
-同步 Team 实际状态
-        ↓
-检查 active 账号额度
-        ↓
-额度不足 → 标记 exhausted → 移出 Team → standby
-        ↓
-优先复用 standby 旧号
-        ↓
-不够再创建新号
-        ↓
-同步 active 认证文件到已启用远端
+```mermaid
+flowchart TD
+  WebUI["Vue WebUI"] --> API["FastAPI API"]
+  CLI["autoteam CLI"] --> Manager["manager.py"]
+  API --> Manager
+  Manager --> Swap["swap_seat.py"]
+  Swap --> TeamAPI["ChatGPT Team API\n只允许 PATCH users seat_type"]
+  Swap --> CPA["CPA / CLIProxyAPI\nauth-files + quota + OAuth disabled"]
+  Manager --> CFMail["Cloudflare Temp Email\n读取 pending invite 邮件"]
+  Swap --> QuotaState["swap_seat_quota_state.json"]
+  Swap --> Cooldown["swap_seat_cooldown.json"]
+  API --> TeamContext["team_context.py\nTEAM_WORKSPACES_JSON"]
 ```
 
-> 轮转目标是 **Team 总人数**。
-> Team 中已有的 owner / 外部成员也会计入目标人数。
+## 运行真相源
 
-## 账号状态机
+证据优先级：
 
-```text
-active ──额度不足──> exhausted ──移出 Team──> standby
-   ↑                                      │
-   └──────── 额度恢复 / 登录成功 ──────────┘
-```
+1. Team runtime：当前成员、seat_type、pending invite。
+2. CPA runtime：auth-files、quota、OAuth disabled/active。
+3. 本地状态：quota cache、cooldown、管理员 session、多 Team 配置。
+4. 旧账号池文件：仅用于兼容 pending invite 注册状态，不作为 quota 真相源。
 
-| 状态 | 含义 |
-|------|------|
-| `active` | 当前在 Team 中，且本地认为可用 |
-| `exhausted` | 当前在 Team 中，但额度不足，等待移出 |
-| `standby` | 已不在当前轮转席位中，等待后续复用 |
-| `pending` | 注册 / 创建流程尚未完成 |
+## TeamContext
 
-## 同步模型
+`team_context.py` 负责解析 `TEAM_WORKSPACES_JSON`。
 
-项目中主要有三类“同步”：
+- 未配置多 Team：回退当前管理员 session 的 Team。
+- 配置多 Team：每个 Team 有独立 `account_id`、active 保留数、pending invite、session。
+- `account_id` 是 quota cache 与 cooldown 的隔离主键。
 
-| 动作 | 方向 | 用途 |
-|------|------|------|
-| `同步账号` | Team / `auths/` → `accounts.json` | 修复本地账号池记录 |
-| `同步远端` | 本地 active / 主号 → 已启用远端 | 将认证同步到 CPA / Sub2API |
-| `拉取 CPA` | CPA → 本地 | 从 CPA 反向恢复 / 导入认证文件 |
+## swap plan
 
-### 反向同步特点
+`swap_seat.py` 会构建一个无副作用 plan：
 
-- 同账号去重（CPA 与本地都只保留一份）
-- 按本地命名规范重写文件名
-- 比较 `last_refresh` / `expired`，避免用旧 CPA 文件覆盖本地新 token
-- 新导入账号默认标记为 `standby`
+1. Team member 按邮箱匹配 CPA Codex OAuth。
+2. 白名单成员跳过。
+3. 查询或复用 quota cache。
+4. 按 5h + weekly 剩余额度排序。
+5. 选择最多 `max_chatgpt_active` 个可用成员。
+6. 生成 seat actions 与 CPA OAuth actions。
 
-## OAuth 导入模型
+只有 plan 证明需要修改，且冷却允许时，才会执行副作用。
 
-手动 OAuth 导入支持两种回调方式：
+## 副作用顺序
 
-### 1. 自动回调
+为了避免中间态超过 ChatGPT/OAuth active 保留数：
 
-系统尝试在本机启动：
+1. 先把未选中成员切 Codex。
+2. 再把选中成员切 ChatGPT。
+3. 先 disable 未选中 CPA OAuth。
+4. 再 enable 选中 CPA OAuth。
 
-```text
-http://localhost:1455/auth/callback
-```
+## 无可用 quota
 
-如果浏览器和 AutoTeam 在同一台机器上，OpenAI 成功回跳后可自动完成认证。
+如果所有非白名单成员都没有可用 quota：
 
-### 2. 手动回调
+- 不切 seat。
+- 不启停 CPA OAuth。
+- 不消耗 swap 冷却。
+- 返回 `no_quota_available`。
+- 若调用方启用 pending invite 替换，则进入 `cmd_add` 消费已有 pending invite。
 
-如果浏览器不在同一台机器上，或 `localhost:1455` 无法回到 AutoTeam：
+## pending invite 注册
 
-- 用户在浏览器完成登录
-- 再把最终回调 URL 粘贴给 AutoTeam
-- 系统提取 `code/state` 完成 token 交换
+注册前会先执行 `force_existing_members_to_codex`：
 
-## 核心模块
+- 非白名单旧成员预切 Codex。
+- 如果仍有无法预切的 ChatGPT seat 达到上限，则中止注册。
+- 找到已有 pending invite 邮箱。
+- 通过 CFMail 读取 invite 邮件并完成注册。
+- 注册后只把新号切 ChatGPT 并启用其 CPA OAuth。
 
-| 模块 | 作用 |
-|------|------|
-| `manager.py` | CLI 入口与核心轮转逻辑 |
-| `api.py` | HTTP API、鉴权、后台任务、自动巡检 |
-| `accounts.py` | 本地账号池持久化 |
-| `account_ops.py` | 删除 / 清理 / 远端对账 |
-| `chatgpt_api.py` | 通过浏览器上下文调用 ChatGPT 内部接口 |
-| `codex_auth.py` | Codex OAuth、refresh、额度检查 |
-| `invite.py` | 自动注册流程 |
-| `cloudmail.py` | CloudMail 客户端 |
-| `cloudflare_temp_email.py` | Cloudflare Temp Email 客户端 |
-| `mail_provider.py` | 邮箱服务选择与账号绑定辅助 |
-| `cpa_sync.py` | CPA 双向同步与去重 |
-| `sub2api_sync.py` | Sub2API 同步与分组处理 |
-| `sync_targets.py` | 统一分发 CPA / Sub2API 同步目标 |
-| `manual_account.py` | 手动 OAuth 导入（自动 / 手动回调） |
+## 安全闸
 
-## 项目结构
+`chatgpt_api.py` 拦截危险 Team API 写操作：
 
-```text
-autoteam/
-├── docs/                       # 文档
-├── src/autoteam/
-│   ├── manager.py              # CLI 入口
-│   ├── api.py                  # HTTP API + 后台任务 + 自动巡检
-│   ├── setup_wizard.py         # 首次配置向导
-│   ├── admin_state.py          # 管理员登录态 (state.json)
-│   ├── config.py               # 配置加载
-│   ├── accounts.py             # 账号池持久化
-│   ├── account_ops.py          # 删除 / 清理 / 对账
-│   ├── chatgpt_api.py          # ChatGPT Team 内部 API 调用
-│   ├── cloudmail.py            # CloudMail 客户端
-│   ├── cloudflare_temp_email.py # Cloudflare Temp Email 客户端
-│   ├── mail_provider.py        # 邮箱服务选择与账号绑定
-│   ├── codex_auth.py           # Codex OAuth 与 token 管理
-│   ├── cpa_sync.py             # CPA 正反向同步
-│   ├── sub2api_sync.py         # Sub2API 同步与分组
-│   ├── sync_targets.py         # 统一远端同步目标
-│   ├── manual_account.py       # 手动 OAuth 导入
-│   ├── invite.py               # 自动注册流程
-│   └── web/dist/               # 前端构建产物
-└── web/src/components/         # Web 面板各页面与组件
-```
+- 禁止 `DELETE /users`。
+- 禁止 `DELETE /invites`。
+- 禁止 `POST /invites`。
+- 禁止 `PATCH /invites`。
+- 只允许 `PATCH /users/{id}` 修改 seat_type。
 
-## 前端结构
+`api.py` 里旧 remove/kick/cleanup/fill/sync 入口也会返回 `410`。
 
-当前 Web 面板已按职责拆分为：
+## WebUI 架构
 
-- 仪表盘
-- 配置面板
-- Team 成员
-- 账号池操作
-- 同步中心
-- OAuth 登录
-- 任务历史
-- 日志
+| 页面 | 数据源 | 副作用 |
+|---|---|---|
+| 总览 | `/teams`、`/swap/runtime-status`、`/cpa/files` | 无 |
+| Seat 调度 | Team config、runtime status、CPA files | 提交 swap/manage/add 任务；手动 CPA disable |
+| Team 成员 | `/team/members`、runtime status、CPA files | 可提交消费 pending invite 任务 |
+| 配置面板 | runtime config/source、admin status | 保存配置、管理员 session、巡检配置 |
+| 任务历史 | `/tasks` | 无 |
+| 日志 | `/logs` | 无 |
 
-## 开发
+## 测试重点
 
-```bash
-cd web
-npm install
-npm run dev
-npm run build
-```
+- `test_swap_seat.py`：quota、cache、cooldown、plan、白名单、Team account_id。
+- `test_chatgpt_transport.py`：Team API 安全闸。
+- `test_api_swap_only_disabled.py`：旧入口禁用、任务参数、多 Team。
+- `test_manager_emergency_invite.py`：pending invite 消费与预切 Codex。
+- `test_api_team_members.py`：成员查看与 remove 禁用。
