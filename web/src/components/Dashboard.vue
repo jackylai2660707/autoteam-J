@@ -151,7 +151,7 @@
                 <span class="rounded bg-gray-800 px-2 py-1">5h {{ quotaWindowText(entry, 'primary') }}</span>
                 <span class="rounded bg-gray-800 px-2 py-1">weekly {{ quotaWindowText(entry, 'weekly') }}</span>
                 <span class="rounded bg-gray-800 px-2 py-1">monthly {{ quotaWindowText(entry, 'monthly') }}</span>
-                <span class="rounded bg-gray-800 px-2 py-1">下次 {{ quotaNextCheckLabel(entry) }}</span>
+                <span class="rounded bg-gray-800 px-2 py-1">{{ entry.cache_state === 'blocked_until_reset' ? 'reset后可用' : '下次' }} {{ quotaNextCheckLabel(entry) }}</span>
               </div>
               <div class="mt-3 space-y-1.5">
                 <div v-for="bar in quotaBars(entry)" :key="bar.label" class="grid grid-cols-[4rem_1fr_3rem] items-center gap-2 text-[11px]">
@@ -165,7 +165,7 @@
             </div>
           </div>
           <div v-else class="rounded-xl border border-dashed border-gray-700 px-4 py-6 text-sm text-gray-500">
-            暂无受管 quota 记录。第一次执行 swap_seat 后会记录刷新时间和 5h/weekly 剩余额度。
+            暂无受管 quota 记录。第一次执行 swap_seat 或等待巡检后会记录刷新时间、适用窗口和 reset 时间。
           </div>
         </div>
 
@@ -207,7 +207,7 @@
                   <span class="rounded bg-gray-800 px-2 py-1">5h {{ quotaWindowText(quotaEntryForAuth(auth), 'primary') }}</span>
                   <span class="rounded bg-gray-800 px-2 py-1">weekly {{ quotaWindowText(quotaEntryForAuth(auth), 'weekly') }}</span>
                   <span class="rounded bg-gray-800 px-2 py-1">monthly {{ quotaWindowText(quotaEntryForAuth(auth), 'monthly') }}</span>
-                  <span class="rounded bg-gray-800 px-2 py-1">下次 {{ quotaNextCheckLabel(quotaEntryForAuth(auth)) }}</span>
+                  <span class="rounded bg-gray-800 px-2 py-1">{{ quotaEntryForAuth(auth).cache_state === 'blocked_until_reset' ? 'reset后可用' : '下次' }} {{ quotaNextCheckLabel(quotaEntryForAuth(auth)) }}</span>
                 </div>
               </div>
               <div v-if="activeCodexAuths.length > 5" class="text-xs text-gray-500">

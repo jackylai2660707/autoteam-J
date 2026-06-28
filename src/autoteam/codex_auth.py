@@ -1928,22 +1928,67 @@ def _pick_rate_limit_window(rate_limit, *, explicit_keys=(), alias_terms=(), use
     return {}
 
 
+def _rate_limit_window_haystack(key, value):
+    value = value if isinstance(value, dict) else {}
+    return " ".join(
+        [
+            str(key or ""),
+            str(value.get("name") or ""),
+            str(value.get("label") or ""),
+            str(value.get("type") or ""),
+            str(value.get("window") or ""),
+            str(value.get("period") or ""),
+            str(value.get("kind") or ""),
+        ]
+    ).lower()
+
+
+def _collect_rate_limit_windows(rate_limit):
+    if not isinstance(rate_limit, dict):
+        return []
+    windows = []
+    for key, value in rate_limit.items():
+        if isinstance(value, dict):
+            windows.append((str(key or ""), value, _rate_limit_window_haystack(key, value)))
+    return windows
+
+
+def _window_has_terms(haystack, terms):
+    return any(term in haystack for term in terms)
+
+
 def build_quota_info_from_rate_limit(rate_limit):
     """把 wham/usage 的 rate_limit 统一解析成内部 quota_info。"""
-    used_keys = set()
-    primary = _pick_rate_limit_window(rate_limit, explicit_keys=("primary_window",), alias_terms=("primary",), used_keys=used_keys)
-    weekly = _pick_rate_limit_window(
-        rate_limit,
-        explicit_keys=("secondary_window", "weekly_window"),
-        alias_terms=("weekly", "week", "7d", "secondary"),
-        used_keys=used_keys,
-    )
-    monthly = _pick_rate_limit_window(
-        rate_limit,
-        explicit_keys=("monthly_window", "tertiary_window"),
-        alias_terms=("monthly", "month", "30d", "tertiary"),
-        used_keys=used_keys,
-    )
+    raw_windows = _collect_rate_limit_windows(rate_limit)
+    primary = {}
+    weekly = {}
+    monthly = {}
+
+    if len(raw_windows) == 1:
+        key, value, haystack = raw_windows[0]
+        if key in {"weekly_window", "secondary_window"} or _window_has_terms(haystack, ("weekly", "week", "7d", "secondary")):
+            weekly = value
+        elif key in {"monthly_window", "tertiary_window"} or _window_has_terms(haystack, ("monthly", "month", "30d", "tertiary")):
+            monthly = value
+        else:
+            # ChatGPT may return a single `primary_window` for the long-plan bucket.
+            # Do not show or enforce 5h unless a second long window exists.
+            monthly = value
+    else:
+        used_keys = set()
+        primary = _pick_rate_limit_window(rate_limit, explicit_keys=("primary_window",), alias_terms=("primary",), used_keys=used_keys)
+        weekly = _pick_rate_limit_window(
+            rate_limit,
+            explicit_keys=("secondary_window", "weekly_window"),
+            alias_terms=("weekly", "week", "7d", "secondary"),
+            used_keys=used_keys,
+        )
+        monthly = _pick_rate_limit_window(
+            rate_limit,
+            explicit_keys=("monthly_window", "tertiary_window"),
+            alias_terms=("monthly", "month", "30d", "tertiary"),
+            used_keys=used_keys,
+        )
     quota_windows = []
     if primary:
         quota_windows.append("primary")

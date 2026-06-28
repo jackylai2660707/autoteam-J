@@ -516,6 +516,25 @@ def test_parse_codex_quota_usage_considers_weekly_exhaustion():
     assert info["resets_at"] == 200
 
 
+def test_parse_codex_quota_usage_treats_single_primary_window_as_monthly_only():
+    status, info = cpa_sync.parse_codex_quota_usage(
+        {
+            "rate_limit": {
+                "primary_window": {"used_percent": 25, "reset_at": 300},
+            }
+        }
+    )
+
+    assert status == "ok"
+    assert info["quota_windows"] == ["monthly"]
+    assert info["primary_applicable"] is False
+    assert info["weekly_applicable"] is False
+    assert info["monthly_applicable"] is True
+    assert info["monthly_pct"] == 25
+    assert info["monthly_resets_at"] == 300
+    assert quota_available(status, info) is True
+
+
 def test_parse_codex_quota_usage_handles_har_null_secondary_window():
     status, info = cpa_sync.parse_codex_quota_usage(
         {
@@ -530,9 +549,11 @@ def test_parse_codex_quota_usage_handles_har_null_secondary_window():
     )
 
     assert status == "exhausted"
-    assert info["window"] == "primary"
+    assert info["window"] == "monthly"
     assert info["resets_at"] == 1784851280
+    assert info["quota_info"]["primary_applicable"] is False
     assert info["quota_info"]["weekly_pct"] == 0
+    assert info["quota_info"]["monthly_pct"] == 100
 
 
 def test_parse_codex_quota_usage_considers_monthly_exhaustion():
@@ -686,6 +707,65 @@ def test_cmd_swap_seats_uses_cached_exhausted_until_reset_and_skips_cpa(monkeypa
     assert result["skipped"] is True
     assert result["reason"] == "no_quota_available"
     assert result["summary"]["quota_available"] == 0
+
+
+def test_cmd_swap_seats_rechecks_exhausted_auth_after_reset(monkeypatch, tmp_path):
+    class FakeChatGPT:
+        browser = True
+
+        def update_member_seat_type(self, user_id, seat_type):
+            raise AssertionError("seat should not be updated")
+
+    quota_state_file = tmp_path / "swap_quota_state.json"
+    checked = []
+    auth = {"name": "a.json", "auth_index": "idx-a", "provider": "codex", "email": "a@example.com", "status": "active", "disabled": False}
+
+    monkeypatch.setattr("autoteam.swap_seat.SWAP_COOLDOWN_FILE", tmp_path / "swap_cooldown.json")
+    monkeypatch.setattr("autoteam.swap_seat.SWAP_QUOTA_STATE_FILE", quota_state_file)
+    monkeypatch.setattr("autoteam.swap_seat.get_chatgpt_account_id", lambda: "")
+    record_quota_result(
+        auth,
+        "exhausted",
+        {
+            "window": "monthly",
+            "resets_at": time.time() - 60,
+            "quota_info": {
+                "primary_applicable": False,
+                "weekly_applicable": False,
+                "monthly_applicable": True,
+                "monthly_pct": 100,
+                "monthly_resets_at": time.time() - 60,
+                "quota_windows": ["monthly"],
+            },
+        },
+    )
+
+    _patch_managed_member_emails(monkeypatch, "a@example.com")
+    monkeypatch.setattr("autoteam.swap_seat.fetch_team_members", lambda _chatgpt: [{"email": "a@example.com", "id": "u-a", "seat_type": "default"}])
+    monkeypatch.setattr("autoteam.swap_seat.list_cpa_files", lambda: [auth])
+    monkeypatch.setattr("autoteam.swap_seat.get_managed_cpa_auth_names", lambda: {"a.json"})
+    monkeypatch.setattr(
+        "autoteam.swap_seat.check_cpa_codex_quota",
+        lambda item, account_id=None: checked.append(item["name"])
+        or (
+            "ok",
+            {
+                "primary_applicable": False,
+                "weekly_applicable": False,
+                "monthly_applicable": True,
+                "monthly_pct": 10,
+                "monthly_resets_at": time.time() + 30 * 24 * 60 * 60,
+                "quota_windows": ["monthly"],
+            },
+        ),
+    )
+
+    result = cmd_swap_seats(max_chatgpt_active=1, chatgpt_api=FakeChatGPT())
+
+    assert checked == ["a.json"]
+    assert result["skipped"] is True
+    assert result["reason"] == "no_changes_needed"
+    assert result["summary"]["quota_available"] == 1
 
 
 def test_cmd_swap_seats_uses_recent_ok_cache_to_avoid_frequent_quota_checks(monkeypatch, tmp_path):

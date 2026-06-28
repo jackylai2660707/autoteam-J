@@ -126,7 +126,7 @@
         <div class="mb-3 flex items-center justify-between gap-3">
           <div>
             <h3 class="text-sm font-semibold text-white">受管 quota 一眼看</h3>
-            <p class="mt-1 text-xs text-gray-500">只读展示上次巡检记录：5h / weekly / monthly 剩余、记录新鲜度和 reset 时间；只包含 AutoTeam 受管 OAuth。</p>
+            <p class="mt-1 text-xs text-gray-500">只读展示上次巡检记录：适用 quota 窗口、记录新鲜度和 reset 时间；单窗口长期额度不会显示 5h，只包含 AutoTeam 受管 OAuth。</p>
           </div>
           <div class="flex flex-wrap gap-2 text-[11px] text-gray-400">
             <span class="rounded bg-emerald-500/10 px-2 py-1 text-emerald-300">available {{ quotaSummary.available || 0 }}</span>
@@ -171,7 +171,7 @@
                   上次记录 <span class="text-gray-300">{{ formatTs(entry.updated_at) }}</span>
                 </div>
                 <div class="rounded bg-gray-950/40 px-2 py-1">
-                  {{ entry.cache_state === 'blocked_until_reset' ? 'reset' : '下次复查' }}
+                  {{ entry.cache_state === 'blocked_until_reset' ? 'reset 后可复用' : '下次复查' }}
                   <span class="text-gray-300">{{ quotaNextCheckLabel(entry) }}</span>
                 </div>
               </div>
@@ -179,7 +179,7 @@
           </div>
         </div>
         <div v-else class="rounded-xl border border-dashed border-gray-700 px-4 py-6 text-sm text-gray-500">
-          暂无受管 quota 记录。第一次执行 swap_seat 后会记录每个受管 OAuth 的 5h / weekly 剩余额度和 reset 时间。
+          暂无受管 quota 记录。第一次执行 swap_seat 或等待巡检后，会记录每个受管 OAuth 的适用窗口、剩余额度和 reset 时间。
         </div>
       </div>
     </div>

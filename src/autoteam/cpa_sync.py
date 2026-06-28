@@ -377,7 +377,7 @@ def parse_codex_quota_usage(data: dict | str):
 
     返回值与 autoteam.codex_auth.check_codex_quota 保持一致：
     ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
-    quota_info 同时包含 5h(primary)、weekly(secondary) 和可选 monthly 窗口。
+    quota_info 会标记真实适用窗口；单窗口长期额度不会被误当成 5h。
     """
     from autoteam.codex_auth import parse_codex_usage_payload
 
@@ -385,7 +385,7 @@ def parse_codex_quota_usage(data: dict | str):
 
 
 def check_cpa_codex_quota(auth_entry: dict, account_id: str | None = None):
-    """只通过 CPA API 检查某个 Codex OAuth 的 5h/weekly/monthly quota。"""
+    """只通过 CPA API 检查某个 Codex OAuth 的适用 quota 窗口。"""
     request_headers = {
         "Authorization": "Bearer $TOKEN$",
         "Content-Type": "application/json",
