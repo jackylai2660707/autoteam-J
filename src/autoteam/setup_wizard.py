@@ -7,6 +7,7 @@ import secrets
 import sys
 
 from autoteam.config import PROJECT_ROOT
+from autoteam.cpa_config import normalize_cpa_url
 from autoteam.mail_provider import (
     MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL,
     get_default_mail_service,
@@ -61,7 +62,8 @@ REQUIRED_CONFIGS = [
     ("SUB2API_OPENAI_WS_MODE", "Sub2API OpenAI WS 模式（off/ctx_pool/passthrough）", "off", True),
     ("SUB2API_OPENAI_PASSTHROUGH", "Sub2API OpenAI passthrough（true/false）", "false", True),
     ("SUB2API_OVERWRITE_ACCOUNT_SETTINGS", "Sub2API 同步时覆盖账号默认设置（true/false）", "false", True),
-    ("AUTO_CHECK_REPLACE_WITH_PENDING_INVITE", "自动巡检无可用 quota 时消费 pending invite（true/false）", "false", True),
+    ("AUTO_CHECK_REPLACE_WITH_PENDING_INVITE", "自动巡检 GPT seat 低于目标时补位（true/false）", "false", True),
+    ("AUTO_CHECK_REPLACE_MODE", "自动补位模式（pending_invite/create_invite）", "pending_invite", True),
     ("SWAP_SEAT_WHITELIST_EMAILS", "swap_seat 白名单邮箱（逗号/分号/换行分隔，不查 quota、不切 seat）", "", True),
     ("TEAM_WORKSPACES_JSON", "多 Team 工作区 JSON（可选）", "", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
@@ -195,7 +197,7 @@ def check_and_setup(interactive: bool = True) -> bool:
     return True
 
 
-def _verify_cloudmail(service: dict | None = None):
+def _verify_cloudmail(service: dict | None = None, *, raise_errors: bool = False):
     """验证 CloudMail 配置是否正确：登录 + 创建测试邮箱 + 删除"""
     service = service or {}
     base_url = str(service.get("base_url") or os.environ.get("CLOUDMAIL_BASE_URL", "") or "").strip()
@@ -218,6 +220,8 @@ def _verify_cloudmail(service: dict | None = None):
     except Exception as e:
         logger.error("[验证] %s 登录失败: %s", label, e)
         logger.error("[验证] 请检查 %s 的 base_url / email / password", label)
+        if raise_errors:
+            raise RuntimeError(f"登录失败: {e}") from e
         return False
 
     test_account_id = None
@@ -229,6 +233,8 @@ def _verify_cloudmail(service: dict | None = None):
     except Exception as e:
         logger.error("[验证] %s 创建邮箱失败: %s", label, e)
         logger.error("[验证] 请检查 %s 的 domain 是否正确", label)
+        if raise_errors:
+            raise RuntimeError(f"创建测试邮箱失败: {e}") from e
         return False
 
     try:
@@ -242,7 +248,7 @@ def _verify_cloudmail(service: dict | None = None):
     return True
 
 
-def _verify_cloudflare_temp_email(service: dict | None = None):
+def _verify_cloudflare_temp_email(service: dict | None = None, *, raise_errors: bool = False):
     """验证 Cloudflare Temp Email 配置是否正确：鉴权 + 创建测试邮箱 + 删除。"""
     service = service or {}
     base_url = str(service.get("base_url") or os.environ.get("CF_TEMP_EMAIL_BASE_URL", "") or "").strip()
@@ -264,6 +270,8 @@ def _verify_cloudflare_temp_email(service: dict | None = None):
     except Exception as e:
         logger.error("[验证] %s 登录失败: %s", label, e)
         logger.error("[验证] 请检查 %s 的 base_url / admin_password", label)
+        if raise_errors:
+            raise RuntimeError(f"登录失败: {e}") from e
         return False
 
     test_account_id = None
@@ -275,6 +283,8 @@ def _verify_cloudflare_temp_email(service: dict | None = None):
     except Exception as e:
         logger.error("[验证] %s 创建邮箱失败: %s", label, e)
         logger.error("[验证] 请检查 %s 的 domain 是否正确", label)
+        if raise_errors:
+            raise RuntimeError(f"创建测试邮箱失败: {e}") from e
         return False
 
     try:
@@ -288,39 +298,42 @@ def _verify_cloudflare_temp_email(service: dict | None = None):
     return True
 
 
-def _verify_mail_provider(provider: str | None = None):
+def _verify_mail_provider(provider: str | None = None, *, raise_errors: bool = False):
     default_service = get_default_mail_service()
     if default_service:
-        return _verify_mail_service(default_service)
+        return _verify_mail_service(default_service, raise_errors=raise_errors)
 
     resolved = provider or get_mail_provider_name()
     if resolved == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
-        return _verify_cloudflare_temp_email()
-    return _verify_cloudmail()
+        return _verify_cloudflare_temp_email(raise_errors=raise_errors)
+    return _verify_cloudmail(raise_errors=raise_errors)
 
 
-def _verify_mail_service(service: dict | None):
+def _verify_mail_service(service: dict | None, *, raise_errors: bool = False):
     service = service or {}
     provider = service.get("type")
     if provider == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
-        return _verify_cloudflare_temp_email(service)
-    return _verify_cloudmail(service)
+        return _verify_cloudflare_temp_email(service, raise_errors=raise_errors)
+    return _verify_cloudmail(service, raise_errors=raise_errors)
 
 
-def _verify_mail_services(services: list[dict] | None = None):
+def _verify_mail_services(services: list[dict] | None = None, *, raise_errors: bool = False):
     items = services if services is not None else get_mail_services()
     for service in items:
         missing = get_mail_service_missing_fields(service)
         if missing:
+            if raise_errors:
+                label = get_mail_service_display_name(service)
+                raise RuntimeError(f"{label} 缺少配置: {', '.join(missing)}")
             return False
-        if not _verify_mail_service(service):
+        if not _verify_mail_service(service, raise_errors=raise_errors):
             return False
     return True
 
 
-def _verify_cpa():
+def _verify_cpa(*, raise_errors: bool = False):
     """验证 CPA 配置是否正确：获取认证文件列表"""
-    cpa_url = os.environ.get("CPA_URL", "")
+    cpa_url = normalize_cpa_url(os.environ.get("CPA_URL", ""))
     cpa_key = os.environ.get("CPA_KEY", "")
 
     if not cpa_url or not cpa_key:
@@ -344,20 +357,28 @@ def _verify_cpa():
         if resp.status_code == 401:
             logger.error("[验证] CPA 连接失败: 密钥无效 (401)")
             logger.error("[验证] 请检查 CPA_KEY 是否正确")
+            if raise_errors:
+                raise RuntimeError("CPA 密钥无效 (401)，请检查 CPA_KEY")
             return False
         logger.error("[验证] CPA 连接失败: HTTP %d", resp.status_code)
         logger.error("[验证] 请检查 CPA_URL 是否正确")
+        if raise_errors:
+            raise RuntimeError(f"CPA 返回 HTTP {resp.status_code}，请检查 CPA_URL / CPA_KEY")
         return False
     except requests.exceptions.ConnectionError:
         logger.error("[验证] CPA 连接失败: 无法连接到 %s", cpa_url)
         logger.error("[验证] 请检查 CPA_URL 是否正确，CPA 服务是否已启动")
+        if raise_errors:
+            raise RuntimeError(f"无法连接到 CPA: {cpa_url}")
         return False
     except Exception as e:
         logger.error("[验证] CPA 连接失败: %s", e)
+        if raise_errors:
+            raise RuntimeError(f"CPA 连接失败: {e}") from e
         return False
 
 
-def _verify_sub2api():
+def _verify_sub2api(*, raise_errors: bool = False):
     """验证 Sub2API 配置是否正确：管理员登录并获取账号列表。"""
     sub2api_url = os.environ.get("SUB2API_URL", "")
     sub2api_email = os.environ.get("SUB2API_EMAIL", "")
@@ -371,7 +392,9 @@ def _verify_sub2api():
     try:
         from autoteam.sub2api_sync import verify_sub2api_connection
 
-        return verify_sub2api_connection()
+        return verify_sub2api_connection(raise_errors=raise_errors)
     except Exception as e:
         logger.error("[验证] Sub2API 连接失败: %s", e)
+        if raise_errors:
+            raise RuntimeError(f"Sub2API 连接失败: {e}") from e
         return False

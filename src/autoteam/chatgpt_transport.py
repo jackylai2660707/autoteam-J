@@ -81,6 +81,7 @@ class CurlCffiChatGPTTransport:
 def build_chatgpt_transport(*, session_token: str, account_id: str = "", oai_device_id: str = ""):
     mode = get_chatgpt_api_transport()
     if mode == "playwright":
+        logger.warning("[ChatGPT] CHATGPT_API_TRANSPORT=playwright 已不再用于 Team API；请使用 curl_cffi/auto")
         return None
 
     try:
@@ -90,7 +91,7 @@ def build_chatgpt_transport(*, session_token: str, account_id: str = "", oai_dev
             oai_device_id=oai_device_id,
         )
     except ModuleNotFoundError:
-        logger.info("[ChatGPT] curl_cffi 未安装，继续使用 Playwright transport")
+        logger.warning("[ChatGPT] curl_cffi 未安装，API-only Team 操作无法启动")
         return None
     except Exception as exc:
         logger.warning("[ChatGPT] 初始化 curl_cffi transport 失败: %s", exc)

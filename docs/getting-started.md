@@ -1,6 +1,6 @@
 # 从零开始使用 AutoTeam swap_seat
 
-当前 AutoTeam 是 `swap_seat-only` 控制台。它不再负责创建 invite、kick 成员或维护旧账号池；它只做 CPA quota 检查、seat 收敛、CPA OAuth active/disabled 启停，以及在 Team 全员 quota 耗尽后消费已有 pending invite。
+当前 AutoTeam 默认是 `swap_seat-only` 控制台。它不 kick 成员、不维护旧账号池；主流程只做 CPA quota 检查、seat 收敛、CPA OAuth active/disabled 启停，以及在 swap 后 GPT seat 低于目标时按模式补位。需要创建新 invite 时，使用显式 `invite-add` 或 `AUTO_CHECK_REPLACE_MODE=create_invite`。
 
 ## 1. 准备项
 
@@ -9,13 +9,15 @@
 | ChatGPT Team 管理员 session | 读取 Team 成员、修改 seat_type |
 | CPA / CLIProxyAPI | OAuth/auth 真相源；读取 auth-files、检查 quota、启停 OAuth |
 | Cloudflare Temp Email / CFMail | 读取 pending invite 邮件，完成新号注册 |
-| 已存在的 pending invite | 只有 quota 全耗尽时才会被消费；AutoTeam 不创建 invite |
+| 已存在的 pending invite | 只有 swap 后 GPT seat 低于目标时才会被消费；create 模式可自动创建新 invite |
 
 ## 2. 安装
 
 ```bash
 uv sync
-uv run playwright install chromium
+# 默认使用 CloakBrowser 捕获 session；只有显式设置
+# BROWSER_BACKEND=playwright 时才需要安装 Playwright Chromium：
+# uv run playwright install chromium
 ```
 
 Linux 也可以使用：
@@ -123,9 +125,10 @@ SWAP_SEAT_WHITELIST_EMAILS=owner@example.com;keep@example.com
 AUTO_CHECK_INTERVAL=300
 AUTO_CHECK_TARGET_SEATS=2
 AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true
+AUTO_CHECK_REPLACE_MODE=pending_invite
 ```
 
-`AUTO_CHECK_TARGET_SEATS` 是默认 ChatGPT/OAuth active 保留数，允许 `1~5`。单个 Team 的 `max_chatgpt_active` 优先级更高。
+`AUTO_CHECK_TARGET_SEATS` 是默认 ChatGPT/OAuth active 保留数，允许 `1~5`。单个 Team 的 `max_chatgpt_active` 优先级更高。`AUTO_CHECK_REPLACE_MODE=create_invite` 会在需要补位时自动创建随机 CFMail invite。
 
 ## 5. 首次运行
 
@@ -161,7 +164,8 @@ uv run autoteam manage-teams 2 --no-replace
 - 有 quota 的成员自动保持 ChatGPT/OAuth active。
 - quota 耗尽成员自动回到 Codex + disabled standby。
 - 没有可用 quota 时不做无用 swap。
-- 如果开启 pending invite 替换，会在 Team 全员耗尽后消费已有 pending invite。
+- 如果开启自动补位，会在 GPT seat 低于目标后按模式消费已有 pending invite 或创建新 invite。
+- 如需创建新 invite，请在 Seat 调度页点击“新增 invite 注册”并确认，或运行 `uv run autoteam invite-add 2 --force-create-invite`。
 
 ## 7. 如何确认不会 kick
 

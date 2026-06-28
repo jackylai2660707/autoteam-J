@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from hashlib import md5
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any
 import requests
 
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
+from autoteam.chatgpt_transport import build_chatgpt_transport
 from autoteam.textio import write_text
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,50 @@ def _session_metadata(chatgpt_api) -> dict:
         "chatgpt_plan_type": claims.get("chatgpt_plan_type") or "unknown",
         "chatgpt_account_is_fedramp": False,
     }
+
+
+def _session_account_id(session: dict | None, access_token: str | None = None, fallback: str | None = None) -> str:
+    session = session if isinstance(session, dict) else {}
+    claims = _auth_claims(access_token or session.get("accessToken"))
+
+    account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    accounts = session.get("accounts") if isinstance(session.get("accounts"), dict) else {}
+    default_account = accounts.get("default") if isinstance(accounts.get("default"), dict) else {}
+    nested_default_account = (
+        default_account.get("account") if isinstance(default_account.get("account"), dict) else {}
+    )
+
+    for value in (
+        session.get("accountId"),
+        session.get("account_id"),
+        account.get("id"),
+        account.get("account_id"),
+        nested_default_account.get("id"),
+        nested_default_account.get("account_id"),
+        claims.get("chatgpt_account_id"),
+        claims.get("account_id"),
+        fallback,
+    ):
+        value = str(value or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _session_email(session: dict | None, access_token: str | None = None, fallback: str | None = None) -> str:
+    session = session if isinstance(session, dict) else {}
+    claims = _auth_claims(access_token or session.get("accessToken"))
+    user = session.get("user") if isinstance(session.get("user"), dict) else {}
+    for value in (
+        session.get("email"),
+        user.get("email"),
+        claims.get("email"),
+        fallback,
+    ):
+        value = str(value or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _fetch_available_scopes(chatgpt_api) -> list[str]:
@@ -397,38 +443,248 @@ class _PageBackedChatGPTAPI:
     def _api_fetch(self, method, path, body=None):
         normalized = _normalize_backend_path(path)
         return self.page.evaluate(
-            """async ({method, path, body}) => {
+            """async ({method, path, body, accessToken, accountId}) => {
+                const headers = {'content-type': 'application/json', 'accept': 'application/json'};
+                if (accessToken) headers['authorization'] = `Bearer ${accessToken}`;
+                if (accountId && path.startsWith('/backend-api/')) headers['ChatGPT-Account-Id'] = accountId;
                 const resp = await fetch(path, {
                     method,
                     credentials: 'include',
-                    headers: {'content-type': 'application/json', 'accept': 'application/json'},
+                    headers,
                     body: body === null || body === undefined ? undefined : JSON.stringify(body),
                 });
                 const text = await resp.text();
                 return {status: resp.status, body: text};
             }""",
-            {"method": method, "path": normalized, "body": body},
+            {
+                "method": method,
+                "path": normalized,
+                "body": body,
+                "accessToken": self.access_token,
+                "accountId": self.account_id,
+            },
         )
 
 
-def _session_from_page(page) -> dict:
-    result = page.evaluate(
+class SessionBackedChatGPTAPI:
+    """用已保存的 ChatGPT member session_token 直接调用后端 API。"""
+
+    def __init__(
+        self,
+        *,
+        session_token: str,
+        account_id: str = "",
+        email: str = "",
+        access_token: str | None = None,
+    ):
+        self.session_token = str(session_token or "").strip()
+        self.account_id = str(account_id or "").strip()
+        self.email = str(email or "").strip()
+        self.access_token = str(access_token or "").strip()
+        self.oai_device_id = str(uuid.uuid4())
+        self.http_transport = None
+        self.session = {}
+
+    def start(self):
+        if not self.session_token:
+            raise CodexPatExportError("缺少 member session_token，无法通过 API 创建 Codex PAT")
+        self.http_transport = build_chatgpt_transport(
+            session_token=self.session_token,
+            account_id=self.account_id,
+            oai_device_id=self.oai_device_id,
+        )
+        if not self.http_transport:
+            raise CodexPatExportError("curl_cffi transport 不可用，无法通过 session_token 直连 ChatGPT API")
+        self.refresh_session()
+        return self
+
+    def stop(self):
+        if self.http_transport:
+            try:
+                self.http_transport.close()
+            except Exception:
+                pass
+        self.http_transport = None
+
+    def refresh_session(self) -> dict:
+        if not self.http_transport:
+            raise CodexPatExportError("ChatGPT API transport 尚未初始化")
+        result = self.http_transport.request(
+            "GET",
+            "/api/auth/session",
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "oai-device-id": self.oai_device_id,
+            },
+        )
+        status = int(result.get("status") or 0)
+        body = str(result.get("body") or "")
+        if status < 200 or status >= 300:
+            raise CodexPatExportError(f"member session_token 无法刷新 accessToken: HTTP {status}")
+        try:
+            data = json.loads(body or "{}")
+        except Exception as exc:
+            raise CodexPatExportError("member /api/auth/session 返回非 JSON") from exc
+        if not isinstance(data, dict) or not data.get("accessToken"):
+            raise CodexPatExportError("member /api/auth/session 缺少 accessToken")
+
+        self.session = data
+        self.access_token = str(data.get("accessToken") or "").strip()
+        self.account_id = _session_account_id(data, self.access_token, self.account_id)
+        self.email = _session_email(data, self.access_token, self.email)
+        if not self.account_id:
+            raise CodexPatExportError("member session 缺少 accountId，无法调用 Codex PAT API")
+        return data
+
+    def _build_api_headers(self):
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "ChatGPT-Account-Id": self.account_id,
+            "oai-device-id": self.oai_device_id,
+            "oai-language": "en-US",
+        }
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        return headers
+
+    def _api_fetch(self, method, path, body=None):
+        if not self.http_transport:
+            self.start()
+        normalized = _normalize_backend_path(path)
+        result = self.http_transport.request(
+            method,
+            normalized,
+            headers=self._build_api_headers(),
+            body=body,
+        )
+        if int(result.get("status") or 0) == 401:
+            self.refresh_session()
+            result = self.http_transport.request(
+                method,
+                normalized,
+                headers=self._build_api_headers(),
+                body=body,
+            )
+        return result
+
+
+def _fetch_session_from_page(page) -> dict:
+    return page.evaluate(
         """async () => {
             const resp = await fetch('/api/auth/session', {credentials: 'include', headers: {'accept': 'application/json'}});
             const text = await resp.text();
             return {status: resp.status, body: text};
         }"""
     )
+
+
+def _ensure_chatgpt_origin(page):
+    current_url = str(getattr(page, "url", "") or "")
+    if "chatgpt.com" in current_url:
+        return
+    page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+    time.sleep(5)
+
+
+def _session_from_page(page) -> dict:
+    _ensure_chatgpt_origin(page)
+    result = _fetch_session_from_page(page)
     status = int(result.get("status") or 0)
     if status < 200 or status >= 300:
         raise CodexPatExportError(f"获取 ChatGPT session 失败: HTTP {status}")
     try:
         data = json.loads(str(result.get("body") or "{}"))
     except Exception as exc:
-        raise CodexPatExportError("ChatGPT session 返回非 JSON") from exc
+        page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+        time.sleep(5)
+        result = _fetch_session_from_page(page)
+        try:
+            data = json.loads(str(result.get("body") or "{}"))
+        except Exception:
+            raise CodexPatExportError("ChatGPT session 返回非 JSON") from exc
     if not isinstance(data, dict) or not data.get("accessToken"):
         raise CodexPatExportError("ChatGPT session 缺少 accessToken")
     return data
+
+
+def _session_token_from_cookies(cookies: list[dict] | None) -> str:
+    direct = ""
+    parts: dict[int, str] = {}
+    for cookie in cookies or []:
+        name = str(cookie.get("name") or "")
+        value = str(cookie.get("value") or "")
+        if not value:
+            continue
+        if name == "__Secure-next-auth.session-token":
+            direct = value
+            continue
+        match = re.fullmatch(r"__Secure-next-auth\.session-token\.(\d+)", name)
+        if match:
+            parts[int(match.group(1))] = value
+    if direct:
+        return direct
+    return "".join(parts[idx] for idx in sorted(parts))
+
+
+def capture_chatgpt_session_from_page(page) -> dict:
+    """从已登录 page 捕获可复用的 member session 元数据，不打印任何 token。"""
+    session = _session_from_page(page)
+    try:
+        cookies = page.context.cookies("https://chatgpt.com")
+    except Exception:
+        cookies = []
+    session_token = _session_token_from_cookies(cookies)
+    if not session_token:
+        raise CodexPatExportError("已登录页面未找到 __Secure-next-auth.session-token cookie")
+
+    access_token = str(session.get("accessToken") or "").strip()
+    account_id = _session_account_id(session, access_token)
+    email = _session_email(session, access_token)
+    return {
+        "chatgpt_session_token": session_token,
+        "chatgpt_account_id": account_id,
+        "chatgpt_session_email": email,
+        "chatgpt_session_expires": session.get("expires"),
+        "chatgpt_session_captured_at": time.time(),
+        "access_token": access_token,
+    }
+
+
+def create_save_upload_codex_auth_from_session(
+    session_token: str,
+    *,
+    account_id: str = "",
+    email: str = "",
+    access_token: str | None = None,
+    ttl_days: int | float | None = None,
+    include_hermes: bool = False,
+    token_name: str | None = None,
+    upload: bool = True,
+    main: bool = False,
+) -> dict:
+    """用 member session_token 纯 API 创建 Codex PAT 并保存/上传 CPA。"""
+    api = SessionBackedChatGPTAPI(
+        session_token=session_token,
+        account_id=account_id,
+        email=email,
+        access_token=access_token,
+    )
+    try:
+        api.start()
+        result = create_save_upload_codex_auth_from_chatgpt_api(
+            api,
+            ttl_days=ttl_days,
+            include_hermes=include_hermes,
+            token_name=token_name,
+            upload=upload,
+            main=main,
+        )
+        result["session_account_id"] = api.account_id
+        result["session_email"] = api.email
+        return result
+    finally:
+        api.stop()
 
 
 def create_save_upload_codex_auth_from_page(

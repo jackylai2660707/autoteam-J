@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from autoteam.admin_state import get_admin_email
-from autoteam.mail_provider import build_account_mail_fields, get_mail_provider_name
+from autoteam.mail_provider import MAIL_PROVIDER_CLOUDMAIL, build_account_mail_fields, get_mail_provider_name
 from autoteam.textio import read_text, write_text
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -27,14 +27,29 @@ def _is_main_account_email(email):
     return bool(_normalized_email(email)) and _normalized_email(email) == _normalized_email(get_admin_email())
 
 
+def _parse_bool_flag(value, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "disabled"}:
+        return True
+    if text in {"", "0", "false", "no", "off", "enabled", "active", "ok", "none", "null"}:
+        return False
+    return bool(text)
+
+
 def is_account_disabled(acc: dict | None) -> bool:
     acc = acc or {}
-    return bool(acc.get("disabled", False))
+    return _parse_bool_flag(acc.get("disabled", False))
 
 
 def _normalize_account(acc: dict) -> dict:
     normalized = dict(acc or {})
-    normalized["disabled"] = bool(normalized.get("disabled", False))
+    normalized["disabled"] = is_account_disabled(normalized)
     service_id = normalized.get("mail_service_id")
     normalized["mail_service_id"] = (
         str(service_id).strip() if service_id is not None and str(service_id).strip() else None
@@ -81,9 +96,16 @@ def add_account(
     if find_account(accounts, email):
         return  # 已存在
 
+    legacy_cloudmail_account = cloudmail_account_id is not None and mail_account_id is None
     if mail_account_id is None:
         mail_account_id = cloudmail_account_id
-    resolved_mail_provider = mail_provider or (get_mail_provider_name() if mail_account_id is not None else "")
+    resolved_mail_provider = mail_provider or (
+        MAIL_PROVIDER_CLOUDMAIL
+        if legacy_cloudmail_account
+        else get_mail_provider_name()
+        if mail_account_id is not None
+        else ""
+    )
     mail_fields = (
         build_account_mail_fields(mail_account_id, provider=resolved_mail_provider, service_id=mail_service_id)
         if mail_account_id is not None

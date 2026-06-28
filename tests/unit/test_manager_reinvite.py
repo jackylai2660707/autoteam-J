@@ -1,118 +1,19 @@
-import types
+import pytest
 
-from autoteam import accounts, manager
+from autoteam import manager
 
 
-def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch):
-    updates = []
-
+def test_reinvite_account_is_disabled_without_browser_login(monkeypatch):
     monkeypatch.setattr(
         manager,
         "login_codex_via_browser",
-        lambda email, password, mail_client=None: {
-            "email": email,
-            "access_token": "token-1",
-            "refresh_token": "refresh-1",
-            "plan_type": "team",
-        },
-    )
-    monkeypatch.setattr(manager, "save_auth_file", lambda bundle: f"/tmp/{bundle['email']}.json")
-    monkeypatch.setattr(
-        manager,
-        "update_account",
-        lambda email, **kwargs: updates.append((email, kwargs)),
-    )
-    monkeypatch.setattr(
-        manager, "_auth_repair_reset", lambda email: updates.append((email, {"_auth_repair_reset": True}))
-    )
-    monkeypatch.setattr(manager.time, "time", lambda: 1234567890)
-    monkeypatch.setattr(
-        manager,
-        "_is_email_in_team",
-        lambda email: (_ for _ in ()).throw(AssertionError("should not check team membership separately")),
-    )
-
-    result = manager.reinvite_account(
-        types.SimpleNamespace(browser=False),
-        None,
-        {"email": "tmp-user@example.com", "password": "secret"},
-    )
-
-    assert result is True
-    assert updates == [
-        (
-            "tmp-user@example.com",
-            {
-                "status": accounts.STATUS_ACTIVE,
-                "last_active_at": 1234567890,
-                "auth_file": "/tmp/tmp-user@example.com.json",
-            },
-        ),
-        ("tmp-user@example.com", {"_auth_repair_reset": True}),
-    ]
-
-
-def test_reinvite_account_marks_standby_when_oauth_login_returns_non_team(monkeypatch):
-    monkeypatch.setattr(
-        manager,
-        "login_codex_via_browser",
-        lambda email, password, mail_client=None: {
-            "email": email,
-            "access_token": "token-1",
-            "refresh_token": "refresh-1",
-            "plan_type": "free",
-        },
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reinvite must not login via browser")),
     )
     monkeypatch.setattr(
         manager,
         "_record_auth_repair_failure",
-        lambda *args, **kwargs: {"status": accounts.STATUS_STANDBY},
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reinvite must not mutate account state")),
     )
 
-    result = manager.reinvite_account(
-        types.SimpleNamespace(browser=False),
-        None,
-        {"email": "tmp-user@example.com", "password": ""},
-    )
-
-    assert result is False
-
-
-def test_reinvite_account_marks_auth_pending_when_oauth_login_fails_but_team_seat_is_still_occupied(monkeypatch):
-    monkeypatch.setattr(manager, "login_codex_via_browser", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        manager,
-        "_record_auth_repair_failure",
-        lambda *args, **kwargs: {"status": accounts.STATUS_AUTH_PENDING},
-    )
-
-    result = manager.reinvite_account(
-        types.SimpleNamespace(browser=False),
-        None,
-        {"email": "tmp-user@example.com", "password": ""},
-    )
-
-    assert result is False
-
-
-def test_reinvite_account_requests_team_seat_release_when_oauth_fails_after_rejoin(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(manager, "login_codex_via_browser", lambda *args, **kwargs: None)
-
-    def fake_record(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return {"status": accounts.STATUS_STANDBY, "auth_last_error": "auth_code_missing", "seat_released": True}
-
-    monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
-
-    result = manager.reinvite_account(
-        types.SimpleNamespace(browser=False),
-        None,
-        {"email": "tmp-user@example.com", "password": ""},
-    )
-
-    assert result is False
-    assert captured["args"][:3] == ("tmp-user@example.com", "login_failed", "登录失败")
-    assert captured["kwargs"]["release_team_seat"] is True
+    with pytest.raises(RuntimeError, match="swap_seat-only"):
+        manager.reinvite_account(None, None, {"email": "tmp-user@example.com", "password": "secret"})

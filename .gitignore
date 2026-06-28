@@ -15,3 +15,8 @@ test.py
 web/node_modules/
 .codex
 .coverage
+data/
+*.har
+managed_cpa_auths.json
+swap_seat_cooldown.json
+swap_seat_quota_state.json

@@ -51,7 +51,8 @@ Authorization: Bearer <API_KEY>
 {
   "interval": 300,
   "target_seats": 2,
-  "replace_with_pending_invite": true
+  "replace_with_pending_invite": true,
+  "replace_mode": "pending_invite"
 }
 ```
 
@@ -133,16 +134,17 @@ Authorization: Bearer <API_KEY>
 
 ### POST `/api/tasks/auto-detect-replace`
 
-先执行单 Team `swap_seat`。如果结果为 `no_quota_available`，再消费已有 pending invite。
+先执行单 Team `swap_seat`。如果 swap 后有效 GPT seat 低于目标，再按补位模式处理。
 
 ```json
 {
   "email": "pending-a@example.com",
-  "account_id": "uuid-a"
+  "account_id": "uuid-a",
+  "replace_mode": "pending_invite"
 }
 ```
 
-`email` 可留空，系统会从 pending invite 列表中选择可用 CFMail 邮箱。
+`email` 可留空，pending 模式会从 pending invite 列表中选择可用 CFMail 邮箱；`replace_mode=create_invite` 时会创建新的随机 CFMail invite。
 
 ### POST `/api/tasks/manage-teams`
 
@@ -151,11 +153,12 @@ Authorization: Bearer <API_KEY>
 ```json
 {
   "max_chatgpt_active": 2,
-  "replace_with_pending_invite": true
+  "replace_with_pending_invite": true,
+  "replace_mode": "pending_invite"
 }
 ```
 
-每个 Team 会优先使用自己配置的 `max_chatgpt_active`；没有配置时使用请求里的默认值。
+每个 Team 会优先使用自己配置的 `max_chatgpt_active`；没有配置时使用请求里的默认值。`replace_mode` 可为 `pending_invite` 或 `create_invite`。
 
 ### POST `/api/tasks/add`
 
@@ -167,6 +170,20 @@ Authorization: Bearer <API_KEY>
   "account_id": "uuid-a"
 }
 ```
+
+### POST `/api/tasks/invite-add`
+
+显式创建一个随机 CFMail 地址，发送新的 Team invite，注册后生成 PAT auth 并上传 CPA。
+
+```json
+{
+  "account_id": "uuid-a",
+  "max_chatgpt_active": 2,
+  "force_create_invite": true
+}
+```
+
+`max_chatgpt_active` 可留空；系统会优先使用目标 Team 配置的 active 保留数。`force_create_invite` 必须为 `true`，否则后端会拒绝请求。该入口只创建 invite，不会 cancel 旧 invite，也不会 kick/remove member。
 
 ## 任务查询
 
@@ -193,7 +210,7 @@ Authorization: Bearer <API_KEY>
 - fill / cleanup / reset-quota
 - Team member remove
 - 手动任意 seat 修改
-- 创建 invite
+- 非 `POST /api/tasks/invite-add` 的任意创建 invite 路径
 - 取消 invite
 - kick/remove member
 

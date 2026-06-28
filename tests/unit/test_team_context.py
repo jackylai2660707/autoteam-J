@@ -11,6 +11,7 @@ def test_parse_team_contexts_inherits_admin_session_and_clamps_limit():
                 "account_id": "acc-a",
                 "workspace_name": "Team A",
                 "max_chatgpt_active": 9,
+                "invite_domains": "pool-a.example.com; pool-b.example.com",
             },
             {
                 "id": "team-b",
@@ -30,6 +31,7 @@ def test_parse_team_contexts_inherits_admin_session_and_clamps_limit():
     assert [ctx.account_id for ctx in contexts] == ["acc-a", "acc-b"]
     assert contexts[0].session_token == "main-session"
     assert contexts[0].max_chatgpt_active == 5
+    assert contexts[0].invite_domains == "pool-a.example.com; pool-b.example.com"
     assert contexts[1].session_token == "team-b-session"
     assert contexts[1].enabled is False
 

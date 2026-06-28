@@ -101,7 +101,9 @@ function formatParams(params) {
     target: 'active保留',
     account_id: 'Team',
     email: 'pending邮箱',
-    replace_with_pending_invite: '耗尽后消费pending',
+    invite_domains: 'invite域名池',
+    replace_with_pending_invite: '自动补位',
+    replace_mode: '补位模式',
     trigger: '触发',
   }
   return Object.entries(params)
@@ -112,6 +114,7 @@ function formatParams(params) {
 
 function formatParamValue(key, value) {
   if (key === 'replace_with_pending_invite') return value ? '开启' : '关闭'
+  if (key === 'replace_mode') return value === 'create_invite' ? '创建invite' : 'pending'
   if (typeof value === 'boolean') return value ? '是' : '否'
   return String(value)
 }
@@ -123,6 +126,7 @@ function commandLabel(command) {
     'auto-detect-replace': '自动检测替换',
     'manage-teams': '多 Team 调度',
     'consume-pending-invite': '消费 pending invite',
+    'create-invite': '新增 invite 注册',
     check: 'quota 检查',
     rotate: 'swap_seat',
   }[command] || command
@@ -146,13 +150,18 @@ function formatResult(result) {
   if (result === null || result === undefined) return '-'
   if (typeof result === 'string') return result
   if (result.mode === 'multi_team_manage') {
-    return `Team成功 ${result.teams_ok || 0}/${result.teams_total || 0} · 失败 ${result.teams_failed || 0} · 耗尽后pending=${result.replace_with_pending_invite ? '开启' : '关闭'}`
+    const mode = result.replace_mode === 'create_invite' ? 'create' : 'pending'
+    return `Team成功 ${result.teams_ok || 0}/${result.teams_total || 0} · 失败 ${result.teams_failed || 0} · 自动补位=${result.replace_with_pending_invite ? mode : '关闭'}`
   }
   if (result.mode === 'auto_detect_replace') {
-    return `${result.replaced ? '已替换' : '未替换'} · ${result.team || result.account_id || 'Team'} · ${result.reason || '-'}`
+    const mode = result.replace_mode === 'create_invite' ? 'create' : 'pending'
+    return `${result.replaced ? '已补位' : '未补位'} · ${mode} · ${result.team || result.account_id || 'Team'} · ${result.reason || '-'}`
   }
   if (result.mode === 'consume_pending_invite') {
     return `${result.invited ? '已消费pending' : '未消费pending'} · ${result.email || result.requested_email || '-'} · ${result.reason || '-'}`
+  }
+  if (result.mode === 'create_invite') {
+    return `${result.invited ? '已新增invite' : '未新增invite'} · ${result.email || '-'} · ${result.reason || '-'}`
   }
   if (result.mode === 'swap_seat') {
     const parts = resultPartsFromSummary(result)

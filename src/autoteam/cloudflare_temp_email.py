@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import secrets
+import threading
 import time
 import uuid
 from email import policy
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 15
 _PAGE_LIMIT = 100
+_DOMAIN_OPTION_ROUND_ROBIN_LOCK = threading.Lock()
+_DOMAIN_OPTION_ROUND_ROBIN_STATE: dict[str, int] = {}
 
 _VERIFICATION_CODE_PATTERNS = (
     r"(?:temporary\s+(?:openai|chatgpt)\s+login\s+code(?:\s+is)?|verification\s+code(?:\s+is)?|login\s+code(?:\s+is)?|code(?:\s+is)?|验证码(?:为|是)?)\D{0,24}(\d{6})",
@@ -42,7 +45,7 @@ def parse_cloudflare_temp_email_domain_options(value: str):
     - `a.com`
     - `*.a.com` / `{random}.a.com`
     - `xxxxx.a.com`（把连续 x 视为随机子域名前缀占位）
-    - `xxxxx.a.com ; xxxx.b.com` 多域名随机选择
+    - `xxxxx.a.com ; xxxx.b.com` 多域名轮询选择
     """
     parts = [part.strip().lower().lstrip("@") for part in re.split(r"[;\n,]+", str(value or "")) if part.strip()]
     options = []
@@ -72,7 +75,14 @@ def choose_cloudflare_temp_email_domain(value: str):
     options = parse_cloudflare_temp_email_domain_options(value)
     if not options:
         return {"domain": str(value or "").strip().lower().lstrip("@"), "enable_random_subdomain": False}
-    return secrets.choice(options)
+    if len(options) == 1:
+        return dict(options[0])
+
+    key = "\n".join(f"{item['domain']}|{int(bool(item['enable_random_subdomain']))}" for item in options)
+    with _DOMAIN_OPTION_ROUND_ROBIN_LOCK:
+        next_index = _DOMAIN_OPTION_ROUND_ROBIN_STATE.get(key, 0)
+        _DOMAIN_OPTION_ROUND_ROBIN_STATE[key] = (next_index + 1) % len(options)
+    return dict(options[next_index % len(options)])
 
 
 def normalize_cloudflare_temp_email_base_url(base_url: str) -> str:

@@ -6,13 +6,13 @@
 
 AutoTeam 现在只围绕一个目标工作：读取 CPA 中的 OAuth/auth-files，检查 Team 成员的 Codex quota，并在不移除任何成员的前提下收敛 seat 与 OAuth active/disabled 状态。
 
-[快速开始](docs/getting-started.md) · [swap_seat 手册](docs/swap-seat.md) · [配置说明](docs/configuration.md) · [API 文档](docs/api.md)
+[快速开始](docs/getting-started.md) · [Agent 接手指南](docs/agent-handoff.md) · [swap_seat 手册](docs/swap-seat.md) · [配置说明](docs/configuration.md) · [API 文档](docs/api.md)
 
 </div>
 
 ---
 
-> **安全边界**：当前版本是 `swap_seat-only`。项目不会 kick/remove Team member，不会 cancel pending invite，不会创建新 invite。Team API 写操作只允许修改成员 `seat_type`；OAuth/auth 的启用与禁用由 CPA 管理 API 完成。
+> **安全边界**：默认主流程是 `swap_seat-only`。项目不会 kick/remove Team member，不会 cancel pending invite；只有显式 `invite-add` 模式会创建一个新的 CFMail Team invite。Team API 写操作仅允许修改成员 `seat_type` 和该受控 invite 创建；OAuth/auth 的启用与禁用由 CPA 管理 API 完成。
 
 ## 核心能力
 
@@ -22,7 +22,8 @@ AutoTeam 现在只围绕一个目标工作：读取 CPA 中的 OAuth/auth-files�
 | 🧠 Quota 判断 | 同时考虑 5h primary window 与 weekly window；任一窗口耗尽都视为不可用 |
 | 🏢 多 Team 管理 | 通过 `TEAM_WORKSPACES_JSON` 管理多个 Team，每个 Team 独立 quota cache、冷却和 pending invite |
 | ☁️ CPA 管理 | CPA 是 OAuth/auth 真相源；AutoTeam 只调用 CPA API 读取 auth、检查 quota、启停 OAuth active/disabled |
-| 📧 Pending invite 消费 | 只有 Team 内现有成员 quota 全部耗尽时，才使用已有 pending invite 的 CFMail 邮箱注册新号 |
+| 📧 Pending invite 消费 | Team 在 swap 后 GPT seat 低于目标时，可使用已有 pending invite 的 CFMail 邮箱注册新号 |
+| ✉️ 新增 invite 模式 | 手动或定时补位时可创建随机 CFMail 地址，发送 Team invite，注册后生成 PAT auth 并上传 CPA |
 | 🧊 冷却与缓存 | 每个 Team 每天最多 swap 3 次、每次间隔至少 2 小时；quota 结果会记录 reset 时间，避免无用检查和无用 swap |
 | 🛡️ 白名单 | 白名单成员不检查 quota、不切 seat、不启停 CPA OAuth |
 
@@ -30,7 +31,7 @@ AutoTeam 现在只围绕一个目标工作：读取 CPA 中的 OAuth/auth-files�
 
 - 不 kick / remove Team member
 - 不 cancel pending invite
-- 不创建新 invite
+- 不在默认 swap / pending invite 流程中创建新 invite；只有显式 `invite-add` 或 `AUTO_CHECK_REPLACE_MODE=create_invite` 会创建
 - 不维护旧本地 OAuth 登录流
 - 不把本地 auth 同步回 CPA 作为主流程
 - 不把账号池状态作为 quota 真相源
@@ -39,7 +40,9 @@ AutoTeam 现在只围绕一个目标工作：读取 CPA 中的 OAuth/auth-files�
 
 ```bash
 uv sync
-uv run playwright install chromium
+# CloakBrowser 是默认 session 捕获后端，首次启动会准备自己的浏览器。
+# 仅在显式改回 BROWSER_BACKEND=playwright 时才需要：
+# uv run playwright install chromium
 uv run autoteam api
 ```
 
@@ -68,7 +71,7 @@ http://127.0.0.1:8787
 uv run autoteam swap-seats 2
 ```
 
-多 Team 自动调度，Team 耗尽后可消费 pending invite：
+多 Team 自动调度，GPT seat 低于目标后可自动补位：
 
 ```bash
 uv run autoteam manage-teams 2
@@ -78,6 +81,12 @@ uv run autoteam manage-teams 2
 
 ```bash
 uv run autoteam manage-teams 2 --no-replace
+```
+
+显式创建一个新 CFMail invite 并注册上传 PAT：
+
+```bash
+uv run autoteam invite-add 2 --force-create-invite
 ```
 
 启动 WebUI / API：
@@ -99,6 +108,7 @@ CPA_KEY=your_cpa_key
 
 AUTO_CHECK_TARGET_SEATS=2
 AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true
+AUTO_CHECK_REPLACE_MODE=pending_invite
 SWAP_SEAT_WHITELIST_EMAILS=owner@example.com;keep@example.com
 
 TEAM_WORKSPACES_JSON=[{"id":"team-a","account_id":"uuid-a","workspace_name":"Team A","max_chatgpt_active":2,"pending_invite_email":"pending-a@example.com"},{"id":"team-b","account_id":"uuid-b","workspace_name":"Team B","max_chatgpt_active":1,"pending_invite_email":"pending-b@example.com"}]
@@ -112,7 +122,7 @@ TEAM_WORKSPACES_JSON=[{"id":"team-a","account_id":"uuid-a","workspace_name":"Tea
 | Seat 调度 | 执行单 Team swap、单 Team 自动检测替换、多 Team 自动调度 |
 | Team 成员 | 查看成员和 pending invite；可手动消费已有 pending invite，不提供 remove/cancel |
 | 配置面板 | 管理 CPA、CFMail、多 Team、白名单、管理员 session、巡检 |
-| 任务历史 | 查看 swap 与 pending invite 任务结果 |
+| 任务历史 | 查看 swap、pending invite 与新增 invite 任务结果 |
 | 日志 | 查看运行日志 |
 
 ## 文档
@@ -120,6 +130,7 @@ TEAM_WORKSPACES_JSON=[{"id":"team-a","account_id":"uuid-a","workspace_name":"Tea
 | 文档 | 内容 |
 |---|---|
 | [swap_seat 手册](docs/swap-seat.md) | 调度策略、安全边界、多 Team、pending invite、冷却与缓存 |
+| [Agent 接手指南](docs/agent-handoff.md) | 面向下个 agent 的功能地图、模块职责、状态文件、测试入口和已知待办 |
 | [从零开始](docs/getting-started.md) | 安装、配置、启动 WebUI、首次运行 |
 | [配置说明](docs/configuration.md) | `.env` 与 WebUI 配置项 |
 | [API 文档](docs/api.md) | 当前保留的 swap_seat API |

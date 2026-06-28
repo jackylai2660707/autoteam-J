@@ -3,6 +3,8 @@
 import base64
 import json
 import logging
+import os
+import re
 import time
 from datetime import datetime
 from hashlib import md5
@@ -12,27 +14,40 @@ import requests
 
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
 from autoteam.config import CPA_KEY, CPA_URL
-from autoteam.textio import write_text
+from autoteam.cpa_config import normalize_cpa_url
+from autoteam.textio import read_text, write_text
 
 logger = logging.getLogger(__name__)
+MANAGED_CPA_AUTHS_FILE = AUTH_DIR.parent / "managed_cpa_auths.json"
 
 
 def _headers():
     return {"Authorization": f"Bearer {CPA_KEY}"}
 
 
+def _cpa_base_url():
+    return normalize_cpa_url(CPA_URL)
+
+
+def _require_cpa_base_url(operation: str) -> str:
+    base_url = _cpa_base_url()
+    if not base_url:
+        raise RuntimeError(f"未配置 CPA_URL，无法{operation}")
+    return base_url
+
+
 def list_cpa_files():
     """获取 CPA 中所有认证文件"""
-    resp = requests.get(f"{CPA_URL}/v0/management/auth-files", headers=_headers(), timeout=10)
+    base_url = _cpa_base_url()
+    if not base_url:
+        logger.warning("[CPA] 未配置 CPA_URL，跳过文件列表读取")
+        return []
+    resp = requests.get(f"{base_url}/v0/management/auth-files", headers=_headers(), timeout=10)
     if resp.status_code != 200:
         logger.error("[CPA] 获取文件列表失败: %d", resp.status_code)
         return []
     data = resp.json()
     return data.get("files", [])
-
-
-def _cpa_base_url():
-    return (CPA_URL or "").rstrip("/")
 
 
 def _cpa_auth_identifier(auth_entry: dict | None) -> str:
@@ -43,6 +58,199 @@ def _cpa_auth_identifier(auth_entry: dict | None) -> str:
         if value:
             return value
     return ""
+
+
+def _auth_name_basename(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return Path(text).name
+
+
+def _parse_auth_name_set(value) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, (set, list, tuple)):
+        parts = [str(item or "") for item in value]
+    else:
+        parts = re.split(r"[,;\s]+", str(value or ""))
+    return {_auth_name_basename(part) for part in parts if _auth_name_basename(part)}
+
+
+def _load_managed_cpa_auth_registry() -> dict:
+    try:
+        raw = read_text(MANAGED_CPA_AUTHS_FILE).strip()
+    except FileNotFoundError:
+        return {"auths": {}}
+    except Exception:
+        logger.warning("[CPA] 读取受管 auth registry 失败，将按空 registry 处理", exc_info=True)
+        return {"auths": {}}
+    if not raw:
+        return {"auths": {}}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        logger.warning("[CPA] 受管 auth registry JSON 无效，将按空 registry 处理")
+        return {"auths": {}}
+    if not isinstance(data, dict):
+        return {"auths": {}}
+    if not isinstance(data.get("auths"), dict):
+        data["auths"] = {}
+    return data
+
+
+def _save_managed_cpa_auth_registry(data: dict) -> None:
+    MANAGED_CPA_AUTHS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_text(MANAGED_CPA_AUTHS_FILE, json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def register_managed_cpa_auth(auth_name_or_path, *, source: str = "autoteam") -> str:
+    """登记 AutoTeam 自己创建/上传的 CPA auth，后续启停/删除只认这些名字。"""
+    name = _auth_name_basename(auth_name_or_path)
+    if not name:
+        return ""
+    registry = _load_managed_cpa_auth_registry()
+    auths = registry.setdefault("auths", {})
+    previous = auths.get(name) if isinstance(auths.get(name), dict) else {}
+    auths[name] = {
+        **previous,
+        "name": name,
+        "source": source,
+        "registered_at": int(previous.get("registered_at") or time.time()),
+        "updated_at": int(time.time()),
+    }
+    _save_managed_cpa_auth_registry(registry)
+    return name
+
+
+def unregister_managed_cpa_auth(auth_name_or_path) -> bool:
+    """从 AutoTeam 受管 registry 移除 auth；不会影响 CPA 文件本身。"""
+    name = _auth_name_basename(auth_name_or_path)
+    if not name:
+        return False
+    registry = _load_managed_cpa_auth_registry()
+    auths = registry.setdefault("auths", {})
+    removed = False
+    for key in list(auths.keys()):
+        entry = auths.get(key)
+        entry_name = _auth_name_basename(entry.get("name") if isinstance(entry, dict) else key)
+        if key == name or entry_name == name:
+            auths.pop(key, None)
+            removed = True
+    if removed:
+        _save_managed_cpa_auth_registry(registry)
+    return removed
+
+
+def _extract_upload_response_auth_names(data) -> set[str]:
+    """CPA 可能按自己的规则重命名 auth，登记响应里的真实名字。"""
+    names = set()
+    if isinstance(data, dict):
+        for key in ("name", "filename", "file_name", "path", "id"):
+            name = _auth_name_basename(data.get(key))
+            if name:
+                names.add(name)
+        for key in ("file", "auth", "auth_file", "uploaded", "data", "result"):
+            names.update(_extract_upload_response_auth_names(data.get(key)))
+        for key in ("files", "auths", "items"):
+            names.update(_extract_upload_response_auth_names(data.get(key)))
+    elif isinstance(data, list):
+        for item in data:
+            names.update(_extract_upload_response_auth_names(item))
+    elif isinstance(data, str):
+        name = _auth_name_basename(data)
+        if name:
+            names.add(name)
+    return names
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _explicit_managed_flag(acc: dict | None) -> bool | None:
+    acc = acc or {}
+    if "managed_by_autoteam" not in acc:
+        return None
+    raw = acc.get("managed_by_autoteam")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return _truthy_env(raw)
+
+
+def _account_looks_autoteam_created(acc: dict | None) -> bool:
+    """保守识别 AutoTeam 创建的本地账号，避免把 CPA 反向同步账号当成可操作对象。"""
+    acc = acc or {}
+    explicit_managed = _explicit_managed_flag(acc)
+    if explicit_managed is not None:
+        return explicit_managed
+    if str(acc.get("created_by") or "").lower() == "autoteam":
+        return True
+    if acc.get("mail_account_id") is not None or acc.get("cloudmail_account_id") is not None:
+        return True
+    return False
+
+
+def get_managed_cpa_auth_names(accounts: list[dict] | None = None) -> set[str]:
+    """返回允许 AutoTeam 在 CPA 中启停/删除的 auth 文件名集合。
+
+    来源只包含：
+    - 本项目上传成功后写入的 registry；
+    - 可选显式环境变量 CPA_MANAGED_AUTH_NAMES（需 CPA_ALLOW_MANUAL_MANAGED_AUTH_NAMES=true）；
+    - 本地账号池里看起来由 AutoTeam 注册流程创建的账号 auth_file。
+    """
+    names = set()
+    manual_names = os.environ.get("CPA_MANAGED_AUTH_NAMES", "")
+    if _truthy_env(os.environ.get("CPA_ALLOW_MANUAL_MANAGED_AUTH_NAMES")):
+        names.update(_parse_auth_name_set(manual_names))
+    elif str(manual_names or "").strip():
+        logger.warning(
+            "[CPA] 已忽略 CPA_MANAGED_AUTH_NAMES；如确需手动托管 CPA auth，请显式设置 CPA_ALLOW_MANUAL_MANAGED_AUTH_NAMES=true"
+        )
+
+    registry = _load_managed_cpa_auth_registry()
+    for key, entry in registry.get("auths", {}).items():
+        if isinstance(entry, dict):
+            names.update(_parse_auth_name_set([entry.get("name") or key]))
+        else:
+            names.update(_parse_auth_name_set([key]))
+
+    if accounts is None:
+        try:
+            from autoteam.accounts import load_accounts
+
+            accounts = load_accounts()
+        except Exception:
+            accounts = []
+    explicit_unmanaged_names = set()
+    for acc in accounts or []:
+        if not isinstance(acc, dict):
+            continue
+        name = _auth_name_basename(acc.get("auth_file"))
+        if _explicit_managed_flag(acc) is False:
+            if name:
+                explicit_unmanaged_names.add(name)
+            continue
+        if not _account_looks_autoteam_created(acc):
+            continue
+        if name:
+            names.add(name)
+    return names - explicit_unmanaged_names
+
+
+def cpa_auth_name_candidates(auth_entry_or_name) -> set[str]:
+    if isinstance(auth_entry_or_name, dict):
+        candidates = set()
+        for key in ("name", "id", "path"):
+            candidates.update(_parse_auth_name_set([auth_entry_or_name.get(key)]))
+        return candidates
+    return _parse_auth_name_set([auth_entry_or_name])
+
+
+def is_managed_cpa_auth(auth_entry_or_name, managed_names: set[str] | None = None) -> bool:
+    managed_names = get_managed_cpa_auth_names() if managed_names is None else {_auth_name_basename(name) for name in managed_names}
+    candidates = cpa_auth_name_candidates(auth_entry_or_name)
+    return bool(candidates and candidates & managed_names)
 
 
 def _cpa_auth_index(auth_entry: dict | None) -> str:
@@ -65,24 +273,62 @@ def is_cpa_codex_oauth(auth_entry: dict | None) -> bool:
     return bool(email)
 
 
+def cpa_auth_is_disabled(auth_entry: dict | None) -> bool:
+    """兼容 CPA disabled 字段的布尔/字符串返回值。"""
+    if not auth_entry:
+        return False
+    value = auth_entry.get("disabled", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "disabled"}:
+        return True
+    if text in {"", "0", "false", "no", "off", "active", "enabled", "ok", "none", "null"}:
+        return False
+    return bool(text)
+
+
+def _coerce_bool(value, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"", "0", "false", "no", "off", "none", "null"}:
+        return False
+    return bool(text)
+
+
 def cpa_auth_is_active(auth_entry: dict | None) -> bool:
     """CPA 侧 OAuth 是否处于可调度 active 状态。"""
-    auth_entry = auth_entry or {}
+    if not auth_entry or cpa_auth_is_disabled(auth_entry):
+        return False
     status = str(auth_entry.get("status") or "").strip().lower()
-    return not bool(auth_entry.get("disabled", False)) and status == "active"
+    # CPA 有些列表响应只返回 disabled=false 而不返回 status；这类条目已经可调度，
+    # 否则会在容量统计里被漏算，导致下一轮误选超过目标数量的 active OAuth。
+    return not status or status in {"active", "enabled", "ok"}
 
 
-def set_cpa_auth_disabled(auth_entry_or_name, disabled: bool):
-    """通过 CPA management API 启用/禁用单个 OAuth/auth-file。"""
+def set_cpa_auth_disabled(auth_entry_or_name, disabled: bool, *, force: bool = False):
+    """通过 CPA management API 启用/禁用单个 OAuth/auth-file；默认只允许自管 auth。"""
     if isinstance(auth_entry_or_name, dict):
         name = _cpa_auth_identifier(auth_entry_or_name)
     else:
         name = str(auth_entry_or_name or "").strip()
     if not name:
         raise ValueError("CPA auth name/id 为空")
+    if not force and not is_managed_cpa_auth(auth_entry_or_name):
+        raise PermissionError(f"禁止修改未由 AutoTeam 创建/登记的 CPA auth: {_auth_name_basename(name) or name}")
 
+    base_url = _require_cpa_base_url("更新 CPA auth 状态")
     resp = requests.patch(
-        f"{_cpa_base_url()}/v0/management/auth-files/status",
+        f"{base_url}/v0/management/auth-files/status",
         headers={**_headers(), "Content-Type": "application/json"},
         json={"name": name, "disabled": bool(disabled)},
         timeout=10,
@@ -104,6 +350,7 @@ def cpa_api_call(auth_entry_or_index, method: str, url: str, *, headers: dict | 
     if not auth_index:
         raise ValueError("CPA auth_index 为空，无法通过 api-call 检查 quota")
 
+    base_url = _require_cpa_base_url("调用 CPA api-call")
     payload = {
         "auth_index": auth_index,
         "method": method,
@@ -114,7 +361,7 @@ def cpa_api_call(auth_entry_or_index, method: str, url: str, *, headers: dict | 
         payload["data"] = data
 
     resp = requests.post(
-        f"{_cpa_base_url()}/v0/management/api-call",
+        f"{base_url}/v0/management/api-call",
         headers={**_headers(), "Content-Type": "application/json"},
         json=payload,
         timeout=70,
@@ -130,46 +377,15 @@ def parse_codex_quota_usage(data: dict | str):
 
     返回值与 autoteam.codex_auth.check_codex_quota 保持一致：
     ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
-    quota_info 同时包含 5h(primary) 和 weekly(secondary) 窗口。
+    quota_info 同时包含 5h(primary)、weekly(secondary) 和可选 monthly 窗口。
     """
-    from autoteam.codex_auth import get_quota_exhausted_info
+    from autoteam.codex_auth import parse_codex_usage_payload
 
-    if isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except Exception:
-            return "auth_error", None
-    if not isinstance(data, dict):
-        return "auth_error", None
-
-    rate_limit = data.get("rate_limit") or {}
-    if not isinstance(rate_limit, dict):
-        return "auth_error", None
-
-    primary = rate_limit.get("primary_window") or {}
-    secondary = rate_limit.get("secondary_window") or {}
-
-    def _num(value, default=0):
-        try:
-            return int(float(value))
-        except Exception:
-            return default
-
-    quota_info = {
-        "primary_pct": _num(primary.get("used_percent", 0)),
-        "primary_resets_at": _num(primary.get("reset_at", 0)),
-        "weekly_pct": _num(secondary.get("used_percent", 0)),
-        "weekly_resets_at": _num(secondary.get("reset_at", 0)),
-    }
-
-    exhausted_info = get_quota_exhausted_info(quota_info, limit_reached=bool(rate_limit.get("limit_reached")))
-    if exhausted_info:
-        return "exhausted", exhausted_info
-    return "ok", quota_info
+    return parse_codex_usage_payload(data)
 
 
 def check_cpa_codex_quota(auth_entry: dict, account_id: str | None = None):
-    """只通过 CPA API 检查某个 Codex OAuth 的 5h/weekly quota。"""
+    """只通过 CPA API 检查某个 Codex OAuth 的 5h/weekly/monthly quota。"""
     request_headers = {
         "Authorization": "Bearer $TOKEN$",
         "Content-Type": "application/json",
@@ -206,15 +422,28 @@ def upload_to_cpa(filepath):
         logger.warning("[CPA] 文件不存在: %s", filepath)
         return False
 
+    try:
+        base_url = _require_cpa_base_url("上传认证文件")
+    except RuntimeError as exc:
+        logger.warning("[CPA] %s", exc)
+        return False
+
     with open(filepath, "rb") as f:
         resp = requests.post(
-            f"{CPA_URL}/v0/management/auth-files",
+            f"{base_url}/v0/management/auth-files",
             headers=_headers(),
             files={"file": (filepath.name, f, "application/json")},
             timeout=10,
         )
 
     if resp.status_code == 200:
+        uploaded_names = {filepath.name}
+        try:
+            uploaded_names.update(_extract_upload_response_auth_names(resp.json()))
+        except Exception:
+            pass
+        for name in uploaded_names:
+            register_managed_cpa_auth(name, source="upload_to_cpa")
         logger.info("[CPA] 已上传: %s", filepath.name)
         return True
     else:
@@ -222,10 +451,23 @@ def upload_to_cpa(filepath):
         return False
 
 
-def delete_from_cpa(name):
-    """从 CPA 删除认证文件"""
+def delete_from_cpa(name, *, force: bool = False):
+    """从 CPA 删除认证文件；默认只允许删除 AutoTeam 已登记的 auth。"""
+    name = _auth_name_basename(name)
+    if not name:
+        logger.warning("[CPA] 删除跳过：auth name 为空")
+        return False
+    if not force and not is_managed_cpa_auth(name):
+        logger.warning("[CPA] 删除跳过：%s 不是 AutoTeam 自管 auth", name)
+        return False
+    try:
+        base_url = _require_cpa_base_url("删除认证文件")
+    except RuntimeError as exc:
+        logger.warning("[CPA] %s", exc)
+        return False
+
     resp = requests.delete(
-        f"{CPA_URL}/v0/management/auth-files",
+        f"{base_url}/v0/management/auth-files",
         headers=_headers(),
         params={"name": name},
         timeout=10,
@@ -240,8 +482,14 @@ def delete_from_cpa(name):
 
 def download_from_cpa(name):
     """从 CPA 下载认证文件内容。"""
+    try:
+        base_url = _require_cpa_base_url("下载认证文件")
+    except RuntimeError as exc:
+        logger.warning("[CPA] %s", exc)
+        return None
+
     resp = requests.get(
-        f"{CPA_URL}/v0/management/auth-files/download",
+        f"{base_url}/v0/management/auth-files/download",
         headers=_headers(),
         params={"name": name},
         timeout=10,
@@ -319,8 +567,8 @@ def _bundle_from_auth_data(auth_data, fallback_name=""):
         # 新版 userscript 导出的 Codex Access Token 在 headers.authorization 里；
         # 归一化/反向同步时必须原样保留，否则会退回旧 OAuth access_token 格式导致 CPA 不可用。
         "headers": auth_data.get("headers") if isinstance(auth_data.get("headers"), dict) else {},
-        "disabled": bool(auth_data.get("disabled", False)),
-        "websockets": bool(auth_data.get("websockets", True)),
+        "disabled": cpa_auth_is_disabled(auth_data),
+        "websockets": _coerce_bool(auth_data.get("websockets"), default=True),
     }
 
 
@@ -369,8 +617,8 @@ def _write_auth_file(filepath, bundle):
     headers = bundle.get("headers") if isinstance(bundle.get("headers"), dict) else {}
     if headers:
         auth_data["headers"] = headers
-    auth_data["disabled"] = bool(bundle.get("disabled", False))
-    auth_data["websockets"] = bool(bundle.get("websockets", True))
+    auth_data["disabled"] = cpa_auth_is_disabled(bundle)
+    auth_data["websockets"] = _coerce_bool(bundle.get("websockets"), default=True)
     write_text(filepath, json.dumps(auth_data, indent=2))
     ensure_auth_file_permissions(filepath)
     return filepath
@@ -505,12 +753,14 @@ def sync_from_cpa():
     updated_accounts = 0
     skipped = 0
     cpa_duplicates_deleted = 0
+    cpa_duplicates_skipped_unmanaged = 0
     local_kept_newer = 0
 
     local_duplicates_deleted, accounts_path_repaired = _cleanup_local_duplicates(accounts)
     if accounts_path_repaired:
         save_accounts(accounts)
 
+    managed_auth_names = get_managed_cpa_auth_names(accounts)
     cpa_files = list_cpa_files()
     if not cpa_files:
         logger.info("[CPA] 未发现可反向同步的认证文件")
@@ -578,6 +828,9 @@ def sync_from_cpa():
         )
         for item in items:
             if item is winner:
+                continue
+            if item["name"] not in managed_auth_names:
+                cpa_duplicates_skipped_unmanaged += 1
                 continue
             if delete_from_cpa(item["name"]):
                 cpa_duplicates_deleted += 1
@@ -700,13 +953,14 @@ def sync_from_cpa():
         save_accounts(accounts)
 
     logger.info(
-        "[CPA] 反向同步完成: 新增文件 %d, 更新文件 %d, 新增账号 %d, 更新账号 %d, 保留本地较新 %d, CPA去重 %d, 本地去重 %d, 跳过 %d",
+        "[CPA] 反向同步完成: 新增文件 %d, 更新文件 %d, 新增账号 %d, 更新账号 %d, 保留本地较新 %d, CPA去重 %d, 未受管跳过 %d, 本地去重 %d, 跳过 %d",
         imported_files,
         updated_files,
         added_accounts,
         updated_accounts,
         local_kept_newer,
         cpa_duplicates_deleted,
+        cpa_duplicates_skipped_unmanaged,
         local_duplicates_deleted,
         skipped,
     )
@@ -718,6 +972,7 @@ def sync_from_cpa():
         "skipped": skipped,
         "local_kept_newer": local_kept_newer,
         "cpa_duplicates_deleted": cpa_duplicates_deleted,
+        "cpa_duplicates_skipped_unmanaged": cpa_duplicates_skipped_unmanaged,
         "local_duplicates_deleted": local_duplicates_deleted,
         "total": len(cpa_files),
     }
@@ -750,9 +1005,13 @@ def sync_to_cpa():
         save_accounts(accounts)
 
     # active 账号的认证文件
+    managed_auth_names = get_managed_cpa_auth_names(accounts)
+
     active_files = {}
     for acc in accounts:
         if is_account_disabled(acc):
+            continue
+        if not _account_looks_autoteam_created(acc):
             continue
         if acc["status"] == STATUS_ACTIVE and acc.get("auth_file"):
             path = Path(acc["auth_file"])
@@ -771,12 +1030,13 @@ def sync_to_cpa():
         logger.info("[CPA] 上传: %s", name)
         if upload_to_cpa(path):
             uploaded += 1
+            managed_auth_names.add(name)
 
     # 删除：CPA 中有但不在 active 列表的（仅限本地管理的账号）
     deleted = 0
     for name, cpa_file in cpa_names.items():
-        email = cpa_file.get("email", "").lower()
-        if email in local_emails and name not in active_files:
+        if name in managed_auth_names and name not in active_files:
+            email = cpa_file.get("email", "").lower()
             logger.info("[CPA] 删除非 active 文件: %s (%s)", name, email)
             if delete_from_cpa(name):
                 deleted += 1
@@ -797,9 +1057,10 @@ def sync_main_codex_to_cpa(filepath):
 
     name = filepath.name
     existing = {item.get("name"): item for item in list_cpa_files()}
+    managed_auth_names = get_managed_cpa_auth_names()
 
     for old_name in existing:
-        if old_name and old_name.startswith("codex-main-"):
+        if old_name and old_name.startswith("codex-main-") and old_name in managed_auth_names:
             logger.info("[CPA] 删除旧主号文件: %s", old_name)
             delete_from_cpa(old_name)
 
@@ -814,10 +1075,11 @@ def delete_main_codex_from_cpa():
     """删除 CPA 中的主号 Codex 认证文件。"""
     existing = list_cpa_files()
     deleted = []
+    managed_auth_names = get_managed_cpa_auth_names()
 
     for item in existing:
         name = item.get("name") or ""
-        if not name.startswith("codex-main-"):
+        if not name.startswith("codex-main-") or name not in managed_auth_names:
             continue
         logger.info("[CPA] 删除主号文件: %s", name)
         if delete_from_cpa(name):

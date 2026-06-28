@@ -53,19 +53,19 @@
                   并登录管理员账号
                 </li>
                 <li>按 F12 打开开发者工具 → Application → Cookies → chatgpt.com</li>
-                <li>找到 <code class="bg-gray-800 px-1 rounded">__Secure-next-auth.session-token</code></li>
+                <li>找到 <code class="bg-gray-800 px-1 rounded">__Secure-next-auth.session-token</code>，也可以直接复制整段 Cookie header 或 DevTools 导出的 cookies JSON</li>
                 <li>
                   如果有 <code class="bg-gray-800 px-1 rounded">.0</code> 和
-                  <code class="bg-gray-800 px-1 rounded">.1</code> 两个，将值按顺序拼接在一起
+                  <code class="bg-gray-800 px-1 rounded">.1</code> 分片，系统会自动按顺序拼接
                 </li>
-                <li>粘贴到下方输入框</li>
+                <li>粘贴到下方输入框，系统只保存解析出的 session_token，不保存整段 Cookie</li>
               </ol>
             </div>
             <div class="space-y-2">
               <input
                 v-model.trim="sessionToken"
                 type="password"
-                placeholder="粘贴 session token"
+                placeholder="可粘贴纯 token / Cookie header / cookies JSON"
                 class="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-white font-mono focus:outline-none focus:border-blue-500"
               />
               <div class="flex justify-end">
@@ -108,8 +108,13 @@
           <div class="border border-gray-800 rounded-xl p-4 bg-gray-800/30">
             <div class="text-sm font-medium text-white">或手动导入 session_token</div>
             <p class="text-xs text-gray-400 mt-1 mb-3">
-              适合你已经在浏览器里拿到 <span class="font-mono">__Secure-next-auth.session-token</span> 的场景。系统会校验 token，并自动识别 workspace ID / 名称。
+              适合你已经在浏览器里拿到 ChatGPT 登录 Cookie 的场景。可以粘贴纯 token、整段 Cookie header，或 DevTools/插件导出的 cookies JSON；系统会提取 <span class="font-mono">__Secure-next-auth.session-token</span> 并校验 workspace。
             </p>
+            <div class="mb-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-xs leading-5 text-cyan-100">
+              示例格式：<span class="font-mono">__Secure-next-auth.session-token=...</span> 或
+              <span class="font-mono">Cookie: __Secure-next-auth.session-token.0=...; __Secure-next-auth.session-token.1=...</span>。
+              不需要粘贴 access token/API key。
+            </div>
             <div class="text-gray-400 text-xs space-y-2 mb-3">
               <div>获取方式：</div>
               <ol class="list-decimal list-inside space-y-1">
@@ -121,10 +126,10 @@
                   并登录管理员账号
                 </li>
                 <li>按 F12 打开开发者工具 → Application → Cookies → chatgpt.com</li>
-                <li>找到 <code class="bg-gray-800 px-1 rounded">__Secure-next-auth.session-token</code></li>
+                <li>找到 <code class="bg-gray-800 px-1 rounded">__Secure-next-auth.session-token</code>，或复制包含它的整段 Cookie/JSON</li>
                 <li>
                   如果有 <code class="bg-gray-800 px-1 rounded">.0</code> 和
-                  <code class="bg-gray-800 px-1 rounded">.1</code> 两个，将值按顺序拼接在一起
+                  <code class="bg-gray-800 px-1 rounded">.1</code> 分片，不需要手动拼接，后端会自动处理
                 </li>
                 <li>粘贴到下方输入框</li>
               </ol>
@@ -141,7 +146,7 @@
                 v-model.trim="sessionToken"
                 rows="4"
                 spellcheck="false"
-                placeholder="粘贴完整 session_token"
+                placeholder="粘贴纯 session_token，或整段 Cookie header / DevTools cookies JSON"
                 class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white font-mono focus:outline-none focus:border-cyan-500"
               ></textarea>
               <div class="flex justify-end">
@@ -289,17 +294,38 @@
           class="mt-1 h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
         />
         <span class="text-sm">
-          <span class="block font-medium text-white">Team 内全部 quota 耗尽时，自动消费 pending invite 替换</span>
+          <span class="block font-medium text-white">GPT seat 低于目标时，自动补位</span>
           <span class="mt-1 block text-xs leading-5 text-gray-400">
-            自动巡检会先运行 swap_seat；只有 CPA 判定没有任何 Team member 同时具备 5h + weekly quota 时，才从现有 pending invite 中选一个 CF 邮箱注册。注册前旧成员切 Codex，注册后新号切 ChatGPT/OAuth active；不会创建新 invite，也不会 kick/remove/cancel invite。
+            自动巡检会先运行 swap_seat；如果 swap 后有效 GPT seat 少于目标保留数，就按下方模式补位。注册前只读检查，注册后只激活新号；不会 kick/remove/cancel invite。
           </span>
         </span>
       </label>
 
+      <div
+        v-if="form.replace_with_pending_invite"
+        class="mt-4 grid grid-cols-1 gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 sm:grid-cols-[220px_1fr]"
+      >
+        <div>
+          <label class="block text-sm font-medium text-cyan-100 mb-1">自动补位模式</label>
+          <select
+            v-model="form.replace_mode"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
+          >
+            <option value="pending_invite">消费已有 pending invite</option>
+            <option value="create_invite">创建新 CFMail invite</option>
+          </select>
+        </div>
+        <p class="text-xs leading-5 text-cyan-100/75">
+          pending 模式只使用 Team 里已经存在的 CFMail invite；create 模式会创建随机 CFMail 地址并真实发送一个新的 Team invite。两种模式都只在 GPT seat 低于目标时触发，并继续遵守 active 保留数。
+        </p>
+      </div>
+
       <div class="mt-3 flex items-start justify-between gap-3">
         <p class="text-xs leading-5 text-gray-500">
           每 {{ form.interval }} 分钟触发一次：
-          <span v-if="form.replace_with_pending_invite">自动检测 → 必要时 pending invite 替换</span>
+          <span v-if="form.replace_with_pending_invite">
+            自动检测 → 必要时{{ form.replace_mode === 'create_invite' ? '创建 invite 补位' : 'pending invite 补位' }}
+          </span>
           <span v-else>swap_seat 收敛</span>。
           若配置了多 Team，会逐个 Team 独立执行同一策略。通过 CPA 检查所有 Team member 的 5h + weekly quota，保留 {{ form.target_seats }} 个 ChatGPT seat/OAuth active（允许 1~5）；母号/admin 和其余非白名单成员全部 Codex；白名单不查 quota、不切 seat、不改 CPA OAuth。
         </p>
@@ -337,6 +363,7 @@ const form = ref({
   interval: 5,
   target_seats: 2,
   replace_with_pending_invite: false,
+  replace_mode: 'pending_invite',
 })
 const saving = ref(false)
 const saved = ref(false)
@@ -404,6 +431,7 @@ async function loadAutoCheckConfig() {
       interval: Math.round(cfg.interval / 60),
       target_seats: clampActiveLimit(cfg.target_seats ?? 2),
       replace_with_pending_invite: !!cfg.replace_with_pending_invite,
+      replace_mode: normalizeReplaceMode(cfg.replace_mode),
     }
   } catch (e) {
     console.error('加载巡检配置失败:', e)
@@ -526,11 +554,13 @@ async function save() {
       interval: form.value.interval * 60,
       target_seats: clampActiveLimit(form.value.target_seats),
       replace_with_pending_invite: !!form.value.replace_with_pending_invite,
+      replace_mode: normalizeReplaceMode(form.value.replace_mode),
     })
     form.value = {
       interval: Math.round(cfg.interval / 60),
       target_seats: clampActiveLimit(cfg.target_seats ?? 2),
       replace_with_pending_invite: !!cfg.replace_with_pending_invite,
+      replace_mode: normalizeReplaceMode(cfg.replace_mode),
     }
     saved.value = true
     setTimeout(() => { saved.value = false }, 3000)
@@ -545,5 +575,9 @@ function clampActiveLimit(value) {
   const n = Number.parseInt(value, 10)
   if (Number.isNaN(n)) return 2
   return Math.max(1, Math.min(5, n))
+}
+
+function normalizeReplaceMode(value) {
+  return String(value || '').trim().toLowerCase().replace('-', '_') === 'create_invite' ? 'create_invite' : 'pending_invite'
 }
 </script>

@@ -1,6 +1,6 @@
 # swap_seat 使用手册
 
-本文档描述当前 AutoTeam 的唯一主流程：`swap_seat`。旧的注册池、kick/remove、邀请创建、OAuth 本地导入、同步中心都已归档或禁用。
+本文档描述当前 AutoTeam 的默认主流程：`swap_seat`。旧的注册池、kick/remove、OAuth 本地导入、同步中心都已归档或禁用；新增 invite 只保留为显式 `invite-add` 模式。
 
 ## 目标
 
@@ -10,8 +10,8 @@
 2. ChatGPT seat / CPA OAuth active 数量可配置为 `1~5`，默认 `2`。
 3. 母号 / admin 默认保持 Codex seat。
 4. 其他成员全部 Codex seat，CPA OAuth disabled standby。
-5. 如果 Team 内所有非白名单成员的 5h + weekly quota 都耗尽，才消费已有 pending invite 注册新号。
-6. 全程不 kick、不 remove、不 cancel invite、不创建新 invite。
+5. 如果 swap 后有效 GPT seat 低于目标，才按补位模式注册新号。
+6. 全程不 kick、不 remove、不 cancel invite；默认 pending 模式不创建新 invite。
 
 ## 安全边界
 
@@ -20,17 +20,18 @@
 - `PATCH /backend-api/accounts/{account_id}/users/{user_id}` 修改 `seat_type`
 - CPA API 禁用或启用 OAuth/auth-file
 - Cloudflare Temp Email 读取已有 pending invite 邮件并完成注册
+- 显式 `invite-add` 模式创建随机 CFMail 地址并发送一个新的 Team invite
 - 本地记录 quota cache、冷却、任务日志
 
 ### 禁止的副作用
 
 - `DELETE /users/*`
 - `DELETE /invites/*`
-- `POST /invites`
+- 默认/旧路径 `POST /invites`（仅 `invite-add` 或 `AUTO_CHECK_REPLACE_MODE=create_invite` 的受控入口可创建）
 - `PATCH /invites/*`
 - Team member kick/remove
 - pending invite cancel
-- 创建新 Team invite
+- 非显式配置模式创建新 Team invite
 - 手动 enable CPA OAuth（enable 只能由 swap_seat 根据 quota 自动选择）
 
 后端在 `ChatGPTTeamAPI` 里有安全闸；即使旧代码路径误调用上述接口，也会抛错中止。
@@ -119,21 +120,21 @@ swap_seat_cooldown.json
 | `workspace_name` | 否 | WebUI 展示名称 |
 | `enabled` | 否 | `false` 时只展示，不参与自动调度 |
 | `max_chatgpt_active` | 否 | 该 Team 保留 ChatGPT/OAuth active 数，范围 `1~5` |
-| `pending_invite_email` | 否 | 指定该 Team quota 全耗尽后优先消费的 pending invite 邮箱 |
+| `pending_invite_email` | 否 | 指定该 Team 低于 GPT seat 目标后优先消费的 pending invite 邮箱 |
 | `email` | 否 | 独立管理员邮箱；默认继承当前管理员 |
 | `session_token` | 否 | 独立 session；留空时共享当前管理员 session |
 
 ## pending invite 替换
 
-AutoTeam 不创建 invite。你需要先在 Team 中准备 pending invite。后续系统只消费已有 pending invite 中的 CFMail 邮箱。
+默认自动替换不创建 invite。你可以先在 Team 中准备 pending invite，后续系统只消费已有 pending invite 中的 CFMail 邮箱；如需自动创建新 invite，显式设置 `AUTO_CHECK_REPLACE_MODE=create_invite`。
 
 自动替换触发条件：
 
 1. 当前 Team 已执行一次 swap 检查。
-2. 返回 `no_quota_available`，即没有任何非白名单成员同时具备 5h + weekly quota。
+2. swap 后有效 GPT seat 少于目标保留数（自管可用 GPT、白名单 GPT、受保护 GPT 都会计入）。
 3. 当前操作开启了 `replace_with_pending_invite`。
-4. 能从 Team pending invite 列表中找到可用 CFMail 邮箱。
-5. 注册前旧成员已经预切 Codex，确保不会超过 ChatGPT seat 上限。
+4. pending 模式能从 Team pending invite 列表中找到可用 CFMail 邮箱；create 模式能创建随机 CFMail 地址并发送 invite。
+5. 注册前只读检查确认当前仍未达到 GPT active 目标。
 
 注册成功后：
 
@@ -212,7 +213,7 @@ SWAP_SEAT_WHITELIST_EMAILS=owner@example.com;keep@example.com
 - CPA OAuth 状态
 - quota cache
 
-pending invite 行提供“消费此 invite 替换”按钮，但不会取消 invite，也不会创建新 invite。
+pending invite 行提供“消费此 invite 替换”按钮，但不会取消 invite，也不会创建新 invite。Seat 调度页的“新增 invite 注册”按钮会显式创建一个随机 CFMail invite。
 
 ## CLI 命令
 
@@ -220,14 +221,20 @@ pending invite 行提供“消费此 invite 替换”按钮，但不会取消 in
 # 单 Team swap，保留 2 个 ChatGPT/OAuth active
 uv run autoteam swap-seats 2
 
-# 先 swap；如果无可用 quota，则消费 pending invite
+# 先 swap；如果 GPT seat 低于目标，则消费 pending invite
 uv run autoteam auto-detect-replace 2
+
+# 先 swap；如果 GPT seat 低于目标，则创建新 CFMail invite
+uv run autoteam auto-detect-replace 2 --replace-mode create_invite
 
 # 指定 pending invite 邮箱
 uv run autoteam auto-detect-replace 2 --email pending@example.com
 
-# 多 Team 调度；耗尽时消费各自 pending invite
+# 多 Team 调度；低于目标时消费各自 pending invite
 uv run autoteam manage-teams 2
+
+# 多 Team 调度；低于目标时自动创建新 CFMail invite
+uv run autoteam manage-teams 2 --replace-mode create_invite
 
 # 多 Team 只做 swap，不消费 pending invite
 uv run autoteam manage-teams 2 --no-replace
@@ -247,6 +254,7 @@ uv run autoteam api --host 0.0.0.0 --port 8787
 | `POST` | `/api/tasks/auto-detect-replace` | 单 Team 自动检测并替换 |
 | `POST` | `/api/tasks/manage-teams` | 多 Team 调度 |
 | `POST` | `/api/tasks/add` | 手动消费已有 pending invite |
+| `POST` | `/api/tasks/invite-add` | 显式创建随机 CFMail invite 并注册上传 PAT |
 | `PATCH` | `/api/cpa/auth/status` | 仅允许手动 disable CPA OAuth |
 
 ## 验证建议

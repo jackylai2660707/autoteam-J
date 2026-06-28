@@ -10,8 +10,6 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 import autoteam.display  # noqa: F401
 from autoteam.admin_state import (
     get_admin_email,
@@ -20,7 +18,7 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
 )
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
-from autoteam.config import get_playwright_launch_options
+from autoteam.browser_backend import new_browser_session
 from autoteam.signup_profile import SignupProfile, generate_signup_profile
 from autoteam.textio import write_text
 
@@ -35,7 +33,7 @@ CODEX_AUTH_URL = "https://auth.openai.com/oauth/authorize"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CALLBACK_PORT = 1455
 CODEX_REDIRECT_URI = f"http://localhost:{CODEX_CALLBACK_PORT}/auth/callback"
-_EARLY_OAUTH_BLOCK_FAILURE_TYPES = {"add_phone", "human_verification", "site_unavailable"}
+_EARLY_OAUTH_BLOCK_FAILURE_TYPES = {"account_deactivated", "add_phone", "human_verification", "site_unavailable"}
 
 
 def _generate_pkce():
@@ -79,6 +77,8 @@ def _classify_oauth_failure(url, body_excerpt=""):
 
     if "add-phone" in url:
         return "add_phone", "需要手机号验证", False
+    if "account_deactivated" in body or "deleted or deactivated" in body:
+        return "account_deactivated", "账号已删除或停用", False
     if "choose-an-account" in url:
         return "choose_account_selection", "卡在账号选择页", True
     if "verify you are human" in body or "captcha" in body:
@@ -528,7 +528,7 @@ def _resolve_email_verification(
         logger.warning("[Codex] 未获取到验证码")
         return "no_code"
 
-    logger.info("[Codex] 获取到验证码: %s", otp)
+    logger.info("[Codex] 获取到验证码: [redacted]")
 
     for submit_attempt in range(1, 3):
         current_url = (getattr(page, "url", "") or "").lower()
@@ -550,7 +550,7 @@ def _resolve_email_verification(
 
         time.sleep(0.5)
         _click_otp_submit_button(page)
-        logger.info("[Codex] 已输入验证码: %s", otp)
+        logger.info("[Codex] 已输入验证码: [redacted]")
 
         submit_status, submit_detail = _wait_for_otp_submit_result(page, timeout=submit_timeout)
         if submit_status == "accepted":
@@ -560,27 +560,24 @@ def _resolve_email_verification(
             used_email_ids.add(otp_email_id)
             detail_suffix = f"，命中提示: {submit_detail}" if submit_detail else ""
             logger.warning(
-                "[Codex] 验证码邮件 %s（code=%s）被页面判定无效%s，标记并跳过该邮件",
+                "[Codex] 验证码邮件 %s（code=[redacted]）被页面判定无效%s，标记并跳过该邮件",
                 otp_email_id,
-                otp,
                 detail_suffix,
             )
             return "invalid"
 
         if submit_attempt < 2:
             logger.warning(
-                "[Codex] 验证码邮件 %s（code=%s）提交后未确认成功，准备重试第 %d/2 次",
+                "[Codex] 验证码邮件 %s（code=[redacted]）提交后未确认成功，准备重试第 %d/2 次",
                 otp_email_id,
-                otp,
                 submit_attempt + 1,
             )
             time.sleep(2)
         else:
             used_email_ids.add(otp_email_id)
             logger.warning(
-                "[Codex] 验证码邮件 %s（code=%s）提交后仍未确认成功，标记并跳过该邮件",
+                "[Codex] 验证码邮件 %s（code=[redacted]）提交后仍未确认成功，标记并跳过该邮件",
                 otp_email_id,
-                otp,
             )
             return "pending"
 
@@ -864,7 +861,14 @@ def _select_oauth_account(page, email: str) -> bool:
 
 
 def login_codex_via_browser(
-    email, password, mail_client=None, *, return_result=False, signup_profile: SignupProfile | None = None
+    email,
+    password,
+    mail_client=None,
+    *,
+    return_result=False,
+    signup_profile: SignupProfile | None = None,
+    pat_export_callback=None,
+    pat_only: bool = False,
 ):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
@@ -886,12 +890,9 @@ def login_codex_via_browser(
     auth_code = None
     failure_result = None
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**get_playwright_launch_options())
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
+    with new_browser_session() as browser_session:
+        context = browser_session.context
+        page = browser_session.page
 
         # === Step 0: 先登录 ChatGPT 并切换到 Team workspace ===
         # 登录前就注入 _account cookie，引导登录流程进入 Team workspace
@@ -1010,6 +1011,40 @@ def login_codex_via_browser(
             logger.info("[Codex] 选择 workspace 后 URL: %s", _page.url)
 
         # _account cookie 已在登录前注入
+
+        if pat_export_callback:
+            blocking_failure = _detect_early_oauth_block(_page)
+            if blocking_failure:
+                browser_session.close()
+                if return_result:
+                    return blocking_failure
+                return None
+            try:
+                pat_result = pat_export_callback(_page)
+            except Exception as exc:
+                browser_session.close()
+                detail = str(exc)
+                logger.error("[CodexPAT] 登录后导出 PAT 失败: %s", detail)
+                if return_result:
+                    return {
+                        "ok": False,
+                        "bundle": None,
+                        "error_type": "pat_export_failed",
+                        "error_detail": detail,
+                        "retryable": True,
+                    }
+                return None
+            if pat_only:
+                browser_session.close()
+                if return_result:
+                    return {
+                        "ok": True,
+                        "bundle": {"email": email, "plan_type": "team", "pat_auth": pat_result},
+                        "error_type": None,
+                        "error_detail": None,
+                        "retryable": False,
+                    }
+                return pat_result
 
         # 关闭 ChatGPT 页面但保留 context
         _page.close()
@@ -1293,7 +1328,7 @@ def login_codex_via_browser(
             logger.warning("[Codex] 未获取到 auth code，当前 URL: %s", page.url)
             failure_result = _build_oauth_failure_result(page.url, body_excerpt)
 
-        browser.close()
+        browser_session.close()
 
     if not auth_code:
         detail = (
@@ -1851,40 +1886,135 @@ def quota_result_resets_at(info):
         return 0
 
 
+def _quota_int(value, default=0):
+    try:
+        return int(float(value or 0))
+    except Exception:
+        return default
+
+
+def _pick_rate_limit_window(rate_limit, *, explicit_keys=(), alias_terms=(), used_keys=None):
+    if not isinstance(rate_limit, dict):
+        return {}
+
+    used_keys = used_keys if used_keys is not None else set()
+    for key in explicit_keys:
+        if key in used_keys:
+            continue
+        value = rate_limit.get(key)
+        if isinstance(value, dict):
+            used_keys.add(key)
+            return value
+
+    lowered_alias_terms = tuple(str(term or "").strip().lower() for term in alias_terms if str(term or "").strip())
+    for key, value in rate_limit.items():
+        if key in used_keys or not isinstance(value, dict):
+            continue
+        haystack = " ".join(
+            [
+                str(key or ""),
+                str(value.get("name") or ""),
+                str(value.get("label") or ""),
+                str(value.get("type") or ""),
+                str(value.get("window") or ""),
+                str(value.get("period") or ""),
+                str(value.get("kind") or ""),
+            ]
+        ).lower()
+        if any(term in haystack for term in lowered_alias_terms):
+            used_keys.add(key)
+            return value
+
+    return {}
+
+
+def build_quota_info_from_rate_limit(rate_limit):
+    """把 wham/usage 的 rate_limit 统一解析成内部 quota_info。"""
+    used_keys = set()
+    primary = _pick_rate_limit_window(rate_limit, explicit_keys=("primary_window",), alias_terms=("primary",), used_keys=used_keys)
+    weekly = _pick_rate_limit_window(
+        rate_limit,
+        explicit_keys=("secondary_window", "weekly_window"),
+        alias_terms=("weekly", "week", "7d", "secondary"),
+        used_keys=used_keys,
+    )
+    monthly = _pick_rate_limit_window(
+        rate_limit,
+        explicit_keys=("monthly_window", "tertiary_window"),
+        alias_terms=("monthly", "month", "30d", "tertiary"),
+        used_keys=used_keys,
+    )
+    quota_windows = []
+    if primary:
+        quota_windows.append("primary")
+    if weekly:
+        quota_windows.append("weekly")
+    if monthly:
+        quota_windows.append("monthly")
+
+    return {
+        "primary_pct": _quota_int(primary.get("used_percent", 0)),
+        "primary_resets_at": _quota_int(primary.get("reset_at", 0)),
+        "primary_applicable": bool(primary),
+        "weekly_pct": _quota_int(weekly.get("used_percent", 0)),
+        "weekly_resets_at": _quota_int(weekly.get("reset_at", 0)),
+        "weekly_applicable": bool(weekly),
+        "monthly_pct": _quota_int(monthly.get("used_percent", 0)),
+        "monthly_resets_at": _quota_int(monthly.get("reset_at", 0)),
+        "monthly_applicable": bool(monthly),
+        "quota_windows": quota_windows,
+    }
+
+
 def get_quota_exhausted_info(quota_info, *, limit_reached=False):
     """根据额度快照判断是否已耗尽，并返回耗尽详情。"""
     if not isinstance(quota_info, dict):
         return None
 
-    primary_pct = int(quota_info.get("primary_pct", 0) or 0)
-    weekly_pct = int(quota_info.get("weekly_pct", 0) or 0)
-    primary_reset = int(quota_info.get("primary_resets_at", 0) or 0)
-    weekly_reset = int(quota_info.get("weekly_resets_at", 0) or 0)
+    primary_pct = _quota_int(quota_info.get("primary_pct", 0))
+    weekly_pct = _quota_int(quota_info.get("weekly_pct", 0))
+    monthly_pct = _quota_int(quota_info.get("monthly_pct", 0))
+    primary_reset = _quota_int(quota_info.get("primary_resets_at", 0))
+    weekly_reset = _quota_int(quota_info.get("weekly_resets_at", 0))
+    monthly_reset = _quota_int(quota_info.get("monthly_resets_at", 0))
 
-    primary_exhausted = primary_pct >= 100
-    weekly_exhausted = weekly_pct >= 100
-    if not (limit_reached or primary_exhausted or weekly_exhausted):
+    primary_applicable = bool(quota_info.get("primary_applicable", True))
+    weekly_applicable = bool(quota_info.get("weekly_applicable", True))
+    monthly_applicable = bool(quota_info.get("monthly_applicable", True))
+    exhausted_flags = {
+        "primary": primary_applicable and primary_pct >= 100,
+        "weekly": weekly_applicable and weekly_pct >= 100,
+        "monthly": monthly_applicable and monthly_pct >= 100,
+    }
+    if not (limit_reached or any(exhausted_flags.values())):
         return None
 
     reset_candidates = []
-    if primary_exhausted and primary_reset:
+    if exhausted_flags["primary"] and primary_reset:
         reset_candidates.append(primary_reset)
-    if weekly_exhausted and weekly_reset:
+    if exhausted_flags["weekly"] and weekly_reset:
         reset_candidates.append(weekly_reset)
+    if exhausted_flags["monthly"] and monthly_reset:
+        reset_candidates.append(monthly_reset)
 
     if not reset_candidates:
         if primary_reset:
             reset_candidates.append(primary_reset)
         if weekly_reset:
             reset_candidates.append(weekly_reset)
+        if monthly_reset:
+            reset_candidates.append(monthly_reset)
 
     resets_at = max(reset_candidates) if reset_candidates else int(time.time() + 18000)
 
-    if primary_exhausted and weekly_exhausted:
+    exhausted_windows = [name for name, exhausted in exhausted_flags.items() if exhausted]
+    if len(exhausted_windows) > 1:
         window = "combined"
-    elif weekly_exhausted:
+    elif exhausted_flags["monthly"]:
+        window = "monthly"
+    elif exhausted_flags["weekly"]:
         window = "weekly"
-    elif primary_exhausted:
+    elif exhausted_flags["primary"]:
         window = "primary"
     else:
         window = "limit"
@@ -1897,11 +2027,43 @@ def get_quota_exhausted_info(quota_info, *, limit_reached=False):
     }
 
 
+def parse_codex_usage_payload(data):
+    """
+    解析 ChatGPT /backend-api/wham/usage 响应。
+
+    返回 ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)。
+    """
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return "auth_error", None
+    if not isinstance(data, dict):
+        return "auth_error", None
+
+    rate_limit = data.get("rate_limit") or {}
+    if not isinstance(rate_limit, dict):
+        return "auth_error", None
+
+    quota_info = build_quota_info_from_rate_limit(rate_limit)
+    exhausted_info = get_quota_exhausted_info(quota_info, limit_reached=bool(rate_limit.get("limit_reached")))
+    if exhausted_info:
+        return "exhausted", exhausted_info
+    return "ok", quota_info
+
+
 def check_codex_quota(access_token, account_id=None):
     """
     通过 /backend-api/wham/usage 查询 Codex 额度状态，不消耗额度。
     返回 ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
-    quota_info = {"primary_pct": int, "primary_resets_at": int, "weekly_pct": int, "weekly_resets_at": int}
+    quota_info = {
+        "primary_pct": int,
+        "primary_resets_at": int,
+        "weekly_pct": int,
+        "weekly_resets_at": int,
+        "monthly_pct": int,
+        "monthly_resets_at": int,
+    }
     """
     import requests
 
@@ -1937,22 +2099,7 @@ def check_codex_quota(access_token, account_id=None):
     except Exception:
         return "auth_error", None
 
-    rate_limit = data.get("rate_limit") or {}
-    primary = rate_limit.get("primary_window") or {}
-    secondary = rate_limit.get("secondary_window") or {}
-
-    quota_info = {
-        "primary_pct": primary.get("used_percent", 0),
-        "primary_resets_at": primary.get("reset_at", 0),
-        "weekly_pct": secondary.get("used_percent", 0),
-        "weekly_resets_at": secondary.get("reset_at", 0),
-    }
-
-    exhausted_info = get_quota_exhausted_info(quota_info, limit_reached=bool(rate_limit.get("limit_reached")))
-    if exhausted_info:
-        return "exhausted", exhausted_info
-
-    return "ok", quota_info
+    return parse_codex_usage_payload(data)
 
 
 def refresh_access_token(refresh_token):

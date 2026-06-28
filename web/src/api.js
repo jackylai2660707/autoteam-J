@@ -50,6 +50,7 @@ export const api = {
   getAdminStatus: () => request('GET', '/admin/status'),
   getCpaFiles: () => request('GET', '/cpa/files'),
   setCpaAuthDisabled: (name, disabled) => request('PATCH', '/cpa/auth/status', { name, disabled }),
+  forgetCpaAuth: (name) => request('POST', '/cpa/auth/forget', { name }),
 
   startAdminLogin: (email) => request('POST', '/admin/login/start', { email }),
   submitAdminSession: (email, sessionToken) => request('POST', '/admin/login/session', { email, session_token: sessionToken }),
@@ -64,10 +65,21 @@ export const api = {
     account_id: accountId,
   }),
   startConsumePendingInvite: (email = '', accountId = '') => request('POST', '/tasks/add', { email, account_id: accountId }),
-  startAutoDetectReplace: (email = '', accountId = '') => request('POST', '/tasks/auto-detect-replace', { email, account_id: accountId }),
-  startManageTeams: (maxChatgptActive = 2, replaceWithPendingInvite = true) => request('POST', '/tasks/manage-teams', {
+  startInviteAdd: (accountId = '', maxChatgptActive = null, forceCreateInvite = false, inviteDomains = '') => request('POST', '/tasks/invite-add', {
+    account_id: accountId,
+    force_create_invite: !!forceCreateInvite,
+    ...(String(inviteDomains || '').trim() ? { invite_domains: String(inviteDomains || '').trim() } : {}),
+    ...(maxChatgptActive === null ? {} : { max_chatgpt_active: Math.max(1, Math.min(5, Number(maxChatgptActive) || 2)) }),
+  }),
+  startAutoDetectReplace: (email = '', accountId = '', replaceMode = '') => request('POST', '/tasks/auto-detect-replace', {
+    email,
+    account_id: accountId,
+    ...(replaceMode ? { replace_mode: replaceMode } : {}),
+  }),
+  startManageTeams: (maxChatgptActive = 2, replaceWithPendingInvite = true, replaceMode = '') => request('POST', '/tasks/manage-teams', {
     max_chatgpt_active: Math.max(1, Math.min(5, Number(maxChatgptActive) || 2)),
     replace_with_pending_invite: !!replaceWithPendingInvite,
+    ...(replaceMode ? { replace_mode: replaceMode } : {}),
   }),
   getTeams: () => request('GET', '/teams'),
   getSwapRuntimeStatus: () => request('GET', '/swap/runtime-status'),

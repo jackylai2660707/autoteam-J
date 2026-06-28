@@ -47,6 +47,7 @@ CF_TEMP_EMAIL_DOMAIN={random}.a.com;{random}.b.com
 
 AUTO_CHECK_TARGET_SEATS=2
 AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true
+AUTO_CHECK_REPLACE_MODE=pending_invite
 TEAM_WORKSPACES_JSON=[]
 ```
 
@@ -85,4 +86,4 @@ PLAYWRIGHT_PROXY_URL=http://user:pass@host.docker.internal:1080
 
 - 不要把真实 `API_KEY`、`CPA_KEY`、管理员 session 提交到 git。
 - WebUI 只建议暴露在内网或反向代理鉴权后。
-- Docker 部署不改变安全边界：仍然不会 kick/remove/cancel invite，也不会创建 invite。
+- Docker 部署不改变安全边界：仍然不会 kick/remove/cancel invite；只有显式 `invite-add` 模式会创建一个新的 CFMail invite。

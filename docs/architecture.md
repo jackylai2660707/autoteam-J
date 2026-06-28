@@ -2,6 +2,8 @@
 
 AutoTeam 当前架构是 `swap_seat-only`。它不再是旧账号池轮转器，而是一个围绕 CPA quota 与 Team seat 的调度控制台。
 
+如果你是新接手的 agent，请先读 [Agent 接手指南](agent-handoff.md)。那份文档按“项目功能、模块职责、状态文件、测试地图、已知待办”组织，比本文更适合作为接手入口。
+
 ## 组件
 
 ```mermaid
@@ -66,13 +68,14 @@ flowchart TD
 - 不消耗 swap 冷却。
 - 返回 `no_quota_available`。
 - 若调用方启用 pending invite 替换，则进入 `cmd_add` 消费已有 pending invite。
+- 若调用方显式触发新增 invite，则进入 `cmd_invite_add` 创建随机 CFMail 地址、发送 Team invite 并完成注册/PAT 上传。
 
 ## pending invite 注册
 
-注册前会先执行 `force_existing_members_to_codex`：
+注册前只执行只读检查：
 
-- 非白名单旧成员预切 Codex。
-- 如果仍有无法预切的 ChatGPT seat 达到上限，则中止注册。
+- 不预切旧成员，不操作外部/主号成员。
+- 如果当前 GPT seat 已达到目标，则中止注册/邀请。
 - 找到已有 pending invite 邮箱。
 - 通过 CFMail 读取 invite 邮件并完成注册。
 - 注册后只把新号切 ChatGPT 并启用其 CPA OAuth。
@@ -83,7 +86,7 @@ flowchart TD
 
 - 禁止 `DELETE /users`。
 - 禁止 `DELETE /invites`。
-- 禁止 `POST /invites`。
+- 默认禁止 `POST /invites`；只有 `cmd_invite_add`/`/api/tasks/invite-add` 受控入口可创建。
 - 禁止 `PATCH /invites`。
 - 只允许 `PATCH /users/{id}` 修改 seat_type。
 
@@ -96,6 +99,7 @@ flowchart TD
 | 总览 | `/teams`、`/swap/runtime-status`、`/cpa/files` | 无 |
 | Seat 调度 | Team config、runtime status、CPA files | 提交 swap/manage/add 任务；手动 CPA disable |
 | Team 成员 | `/team/members`、runtime status、CPA files | 可提交消费 pending invite 任务 |
+| Seat 调度 | `/tasks/invite-add` | 可显式创建随机 CFMail invite 并注册上传 PAT |
 | 配置面板 | runtime config/source、admin status | 保存配置、管理员 session、巡检配置 |
 | 任务历史 | `/tasks` | 无 |
 | 日志 | `/logs` | 无 |
@@ -105,5 +109,5 @@ flowchart TD
 - `test_swap_seat.py`：quota、cache、cooldown、plan、白名单、Team account_id。
 - `test_chatgpt_transport.py`：Team API 安全闸。
 - `test_api_swap_only_disabled.py`：旧入口禁用、任务参数、多 Team。
-- `test_manager_emergency_invite.py`：pending invite 消费与预切 Codex。
+- `test_manager_emergency_invite.py`：pending invite 消费、只读预检与新增 invite force guard。
 - `test_api_team_members.py`：成员查看与 remove 禁用。

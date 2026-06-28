@@ -700,7 +700,7 @@ def _delete_account(token: str, account: dict, *, label: str = "删除账号") -
     return True
 
 
-def verify_sub2api_connection() -> bool:
+def verify_sub2api_connection(*, raise_errors: bool = False) -> bool:
     try:
         token = _login()
         accounts = _list_openai_oauth_accounts(token)
@@ -716,6 +716,8 @@ def verify_sub2api_connection() -> bool:
         return True
     except Exception as exc:
         logger.error("[验证] Sub2API 连接失败: %s", exc)
+        if raise_errors:
+            raise
         return False
 
 

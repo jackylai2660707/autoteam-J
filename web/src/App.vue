@@ -23,7 +23,7 @@
             <span class="bg-gradient-to-r from-blue-300 via-cyan-300 to-sky-400 bg-clip-text text-transparent">Team 管理面板</span>
           </h1>
           <p class="mt-5 max-w-2xl text-lg leading-8 text-slate-300">
-            一个入口围绕 swap_seat：CPA quota 检查、seat 收敛和 OAuth active/disabled 启停；消费 pending invite 前会先把非白名单旧成员切到 Codex seat，绝不 kick Team 成员。
+            一个入口围绕 swap_seat：CPA quota 检查、seat 收敛和 OAuth active/disabled 启停；只操作 AutoTeam 自管成员，外部/主号成员默认保护，绝不 kick Team 成员。
           </p>
           <div class="mt-8 grid max-w-2xl grid-cols-3 gap-4">
             <div class="glass-card-soft p-4">
@@ -240,6 +240,7 @@ function commandLabel(command) {
     'auto-detect-replace': '自动检测替换',
     'manage-teams': '多 Team 调度',
     'consume-pending-invite': '消费 pending invite',
+    'create-invite': '新增 invite 注册',
     check: 'quota 检查',
     rotate: 'swap_seat',
   }[command] || command

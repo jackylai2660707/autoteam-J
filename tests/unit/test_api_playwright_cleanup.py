@@ -2,10 +2,10 @@ import threading
 
 import pytest
 
-from autoteam import api, chatgpt_api
+from autoteam import api, browser_backend
 
 
-def test_launch_browser_stops_playwright_when_browser_launch_fails(tmp_path, monkeypatch):
+def test_browser_backend_stops_playwright_when_browser_launch_fails(monkeypatch):
     class FakePlaywright:
         def __init__(self):
             self.stopped = False
@@ -25,20 +25,14 @@ def test_launch_browser_stops_playwright_when_browser_launch_fails(tmp_path, mon
             return self._playwright
 
     fake_playwright = FakePlaywright()
-    monkeypatch.setattr(chatgpt_api, "SCREENSHOT_DIR", tmp_path)
-    monkeypatch.setattr(chatgpt_api, "get_playwright_launch_options", lambda: {"proxy": {"server": "http://proxy"}})
-    monkeypatch.setattr(chatgpt_api, "sync_playwright", lambda: FakeSyncPlaywright(fake_playwright))
-
-    client = chatgpt_api.ChatGPTTeamAPI()
+    monkeypatch.setenv("BROWSER_BACKEND", "playwright")
+    monkeypatch.setattr(browser_backend, "get_playwright_launch_options", lambda: {"proxy": {"server": "http://proxy"}})
+    monkeypatch.setattr(browser_backend, "sync_playwright", lambda: FakeSyncPlaywright(fake_playwright))
 
     with pytest.raises(RuntimeError, match="proxy launch failed"):
-        client._launch_browser()
+        browser_backend.new_browser_session()
 
     assert fake_playwright.stopped is True
-    assert client.playwright is None
-    assert client.browser is None
-    assert client.context is None
-    assert client.page is None
 
 
 def test_post_admin_login_start_stops_api_when_begin_login_fails(monkeypatch):
@@ -80,7 +74,7 @@ def test_get_team_members_stops_chatgpt_when_start_fails(monkeypatch):
             self.stopped = False
             instances.append(self)
 
-        def start(self):
+        def start_with_session(self, *_args, **_kwargs):
             raise RuntimeError("http proxy failed")
 
         def stop(self):

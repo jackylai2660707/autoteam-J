@@ -17,7 +17,13 @@
 | `SWAP_SEAT_WHITELIST_EMAILS` | 否 | 白名单，不查 quota、不切 seat、不启停 CPA OAuth |
 | `AUTO_CHECK_INTERVAL` | 否 | 自动巡检间隔，秒 |
 | `AUTO_CHECK_TARGET_SEATS` | 否 | 默认 ChatGPT/OAuth active 保留数，`1~5` |
-| `AUTO_CHECK_REPLACE_WITH_PENDING_INVITE` | 否 | Team 全员 quota 耗尽时是否消费 pending invite |
+| `AUTO_CHECK_REPLACE_WITH_PENDING_INVITE` | 否 | swap 后 GPT seat 低于目标时是否自动补位 |
+| `AUTO_CHECK_REPLACE_MODE` | 否 | 自动补位模式：`pending_invite` 或 `create_invite` |
+| `AUTO_CHECK_DISABLE_MEMBER_EMAIL_LOGIN_FOR_PAT` | 否 | 设为 `true` 时禁用未耗尽账号缺/失效 session 后重新捕获，默认允许修复 |
+| `BROWSER_BACKEND` | 否 | 登录/注册/重新捕获 session 的浏览器后端；默认 `cloakbrowser` |
+| `CLOAKBROWSER_PROFILE_DIR` | 否 | CloakBrowser 持久 profile 目录，留空则使用临时上下文 |
+| `CLOAKBROWSER_PROFILE_SEED` | 否 | 可选 profile seed；设置后使用 `CLOAKBROWSER_PROFILE_DIR/<seed>`，便于每轮注册隔离 |
+| `CLOAKBROWSER_HUMANIZE` | 否 | CloakBrowser humanize 开关，默认 `true` |
 | `SWAP_QUOTA_CHECK_MIN_INTERVAL_SECONDS` | 否 | 可用 quota 的最短重复检查间隔，默认 `900` |
 
 ## CPA
@@ -115,13 +121,23 @@ SWAP_SEAT_WHITELIST_EMAILS=owner@example.com;keep@example.com
 AUTO_CHECK_INTERVAL=300
 AUTO_CHECK_TARGET_SEATS=2
 AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true
+AUTO_CHECK_REPLACE_MODE=pending_invite
+AUTO_CHECK_DISABLE_MEMBER_EMAIL_LOGIN_FOR_PAT=false
+BROWSER_BACKEND=cloakbrowser
+CLOAKBROWSER_PROFILE_DIR=/root/docker/Autoteam/cloak-profile
+CLOAKBROWSER_PROFILE_SEED=round-1
+CLOAKBROWSER_HUMANIZE=true
 ```
 
 行为：
 
 - 单 Team：按当前 Team 执行 swap 或自动检测替换。
 - 多 Team：逐个 enabled Team 执行调度。
-- 只有 `AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true` 且 Team 全员 quota 耗尽时，才消费 pending invite。
+- 只有 `AUTO_CHECK_REPLACE_WITH_PENDING_INVITE=true` 且 swap 后有效 GPT seat 低于目标时，才按 `AUTO_CHECK_REPLACE_MODE` 补位。
+- `AUTO_CHECK_REPLACE_MODE=pending_invite` 只消费已有 invite；`create_invite` 会创建随机 CFMail 地址并发送新的 Team invite。
+- 注册成功后会保存 member 的 ChatGPT session；后续 PAT 重建优先用 session API。
+- 如果 member 未耗尽额度但 session 缺失/失效，巡检会用 CloakBrowser 重新捕获 session，关闭浏览器即可，不会登出账号。
+- `BROWSER_BACKEND=cloakbrowser` 只用于登录/注册/重新捕获 session；seat 切换、pending invite 读取、PAT 创建和 CPA 上传仍走 API。
 
 ## 冷却与 quota cache
 

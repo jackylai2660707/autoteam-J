@@ -100,6 +100,28 @@ def test_get_account_mail_service_id_falls_back_to_single_configured_service():
     assert getattr(client, "provider_name", "") == "cloudmail"
 
 
+def test_get_mail_client_with_explicit_provider_does_not_fall_back_to_other_default_service():
+    env = {
+        "MAIL_SERVICES_JSON": json.dumps(
+            [
+                {
+                    "id": "cm-1",
+                    "type": "cloudmail",
+                    "base_url": "https://mail.example.com/api",
+                    "email": "admin@example.com",
+                    "password": "secret",
+                    "domain": "pool.example.com",
+                }
+            ]
+        )
+    }
+
+    client = mail_provider.get_mail_client(provider="cloudflare_temp_email", env=env)
+
+    assert getattr(client, "provider_name", "") == "cloudflare_temp_email"
+    assert getattr(client, "service_id", None) is None
+
+
 def test_get_mail_client_for_account_rejects_ambiguous_service_selection():
     env = {
         "MAIL_SERVICES_JSON": json.dumps(

@@ -2,8 +2,6 @@ import os
 
 os.environ.setdefault("DISPLAY", ":99")
 
-import playwright.sync_api as playwright_sync_api
-
 from autoteam import codex_auth, invite, manager
 from autoteam.signup_profile import SignupProfile
 
@@ -162,6 +160,21 @@ class _FakePlaywright:
         return False
 
 
+class _FakeBrowserSession:
+    def __init__(self, page):
+        self.page = page
+        self.closed = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def close(self):
+        self.closed += 1
+
+
 class _DirectFlowPage:
     def __init__(self):
         self.url = "https://chatgpt.com/auth/login"
@@ -192,6 +205,104 @@ class _DirectFlowPage:
         if "button" in selector:
             return _FakeLocatorGroup([self.submit_button])
         return _FakeLocatorGroup([])
+
+
+class _GoogleSignInPage:
+    def __init__(self):
+        self.url = "https://chatgpt.com"
+        self.keyboard = _FakeKeyboard(self)
+        self.active_element = None
+        self.screenshots = []
+        self.body = "Sign in with Google Email or phone Forgot email? to continue to OpenAI"
+
+    def goto(self, url, wait_until=None, timeout=None):
+        self.url = "https://accounts.google.com/signin/oauth"
+
+    def content(self):
+        return f"<html><body>{self.body}</body></html>"
+
+    def inner_text(self, selector, timeout=0):
+        return self.body
+
+    def screenshot(self, path=None, full_page=False):
+        self.screenshots.append(path)
+
+    def locator(self, selector):
+        if selector == '#identifierId, input[name="identifier"]':
+            return _FakeLocatorGroup([_FakeElement(self, visible=True, editable=True)])
+        return _FakeLocatorGroup([])
+
+
+class _TextButton(_FakeElement):
+    def __init__(self, page=None, text="", on_click=None):
+        super().__init__(page, visible=True, editable=False)
+        self.text = text
+        self.on_click = on_click
+
+    def inner_text(self, timeout=0):
+        return self.text
+
+    def click(self, timeout=0, force=False):
+        super().click(timeout=timeout, force=force)
+        if self.on_click:
+            self.on_click()
+
+
+class _EmailChoicePage:
+    def __init__(self):
+        self.url = "https://chatgpt.com/auth/login"
+        self.keyboard = _FakeKeyboard(self)
+        self.active_element = None
+        self.email_input = _FakeElement(self, visible=True, editable=True)
+        self.password_input = _FakeElement(self, visible=False, editable=True)
+        self.google_clicked = False
+        self.submit_clicked = False
+        self.google_button = _TextButton(self, "Continue with Google", self._click_google)
+        self.submit_button = _TextButton(self, "Continue", self._click_submit)
+
+    def _click_google(self):
+        self.google_clicked = True
+        self.url = "https://accounts.google.com/signin/oauth"
+
+    def _click_submit(self):
+        self.submit_clicked = True
+        self.email_input.visible = False
+        self.password_input.visible = True
+
+    def content(self):
+        return "<html><body>Log in to start chatting</body></html>"
+
+    def inner_text(self, selector, timeout=0):
+        return "Log in to start chatting"
+
+    def screenshot(self, path=None, full_page=False):
+        pass
+
+    def locator(self, selector):
+        if selector in {
+            'input[name="email"]',
+            'input[type="email"]:not([name="identifier"])',
+            'input[placeholder*="email" i]',
+            'input[id="email"]',
+            "#email-input",
+            'input[autocomplete="email"]',
+            'input[autocomplete="username"]:not([name="identifier"])',
+        }:
+            return _FakeLocatorGroup([self.email_input] if self.email_input.visible else [])
+        if selector in {'input[name="password"]', 'input[type="password"]', 'input[id="password"]'}:
+            return _FakeLocatorGroup([self.password_input] if self.password_input.visible else [])
+        if selector == 'button:has-text("Continue")':
+            return _FakeLocatorGroup([self.google_button, self.submit_button])
+        return _FakeLocatorGroup([])
+
+
+class _NoMail:
+    def __init__(self):
+        self.search_calls = 0
+
+    def search_emails_by_recipient(self, *args, **kwargs):
+        self.search_calls += 1
+        raise AssertionError("Google sign-in redirect should fail before waiting for mail")
 
 
 def test_fill_about_you_birthday_by_meta_uses_profile_values(monkeypatch):
@@ -243,7 +354,7 @@ def test_register_direct_once_fails_fast_when_email_step_hits_auth_error(monkeyp
         "_click_primary_auth_button",
         lambda page, field, labels: setattr(page, "url", "https://chatgpt.com/api/auth/error") or True,
     )
-    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(page))
+    monkeypatch.setattr(manager, "new_browser_session", lambda: _FakeBrowserSession(page))
 
     result = manager._register_direct_once(
         object(),
@@ -255,94 +366,52 @@ def test_register_direct_once_fails_fast_when_email_step_hits_auth_error(monkeyp
     assert result is False
 
 
-def test_create_account_direct_reuses_one_profile_across_retries_and_oauth(monkeypatch):
-    profile = SignupProfile("Liam Parker", 1991, 9, 8, 34)
-    register_calls = []
-    login_calls = []
-
-    class _FakeMailClient:
-        provider_name = "cloudmail"
-
-        def create_temp_email(self):
-            return 123, "user@example.com"
-
-        def delete_account(self, account_id):
-            raise AssertionError(f"unexpected delete_account({account_id})")
-
-    monkeypatch.setattr(manager, "generate_signup_profile", lambda: profile)
-    monkeypatch.setattr(manager.time, "sleep", lambda *_args, **_kwargs: None)
-
-    def fake_register(mail_client, email, password, mail_account_id=None, signup_profile=None):
-        register_calls.append(signup_profile)
-        return len(register_calls) == 3
-
-    def fake_login(email, password, *, mail_client=None, max_attempts=3, signup_profile=None):
-        login_calls.append(signup_profile)
-        return {"ok": True, "bundle": {"account_id": "acc-1", "email": email, "plan_type": "team"}}
-
-    monkeypatch.setattr(manager, "_register_direct_once", fake_register)
-    monkeypatch.setattr(manager, "_is_email_in_team", lambda email: False)
-    monkeypatch.setattr(manager, "add_account", lambda *args, **kwargs: None)
-    monkeypatch.setattr(manager, "_login_codex_with_result", fake_login)
-    monkeypatch.setattr(manager, "save_auth_file", lambda bundle: "/tmp/auth.json")
-    monkeypatch.setattr(manager, "update_account", lambda *args, **kwargs: None)
-    monkeypatch.setattr(manager, "_auth_repair_reset", lambda *args, **kwargs: None)
-
-    result = manager.create_account_direct(_FakeMailClient())
-
-    assert result == "user@example.com"
-    assert register_calls == [profile, profile, profile]
-    assert login_calls == [profile]
-
-
-def test_create_account_direct_releases_team_seat_and_returns_none_when_oauth_fails(monkeypatch):
-    recorded = {}
-
-    class _FakeMailClient:
-        provider_name = "cloudmail"
-
-        def create_temp_email(self):
-            return 123, "user@example.com"
-
-        def delete_account(self, account_id):
-            raise AssertionError(f"unexpected delete_account({account_id})")
-
-    monkeypatch.setattr(manager.time, "sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(manager, "generate_signup_profile", lambda: SignupProfile("Liam Parker", 1991, 9, 8, 34))
-    monkeypatch.setattr(manager, "_register_direct_once", lambda *args, **kwargs: True)
-    monkeypatch.setattr(
-        manager, "add_account", lambda *args, **kwargs: recorded.setdefault("added", []).append(args[0])
-    )
+def test_create_account_direct_is_disabled_without_registering(monkeypatch):
     monkeypatch.setattr(
         manager,
-        "_login_codex_with_result",
-        lambda *args, **kwargs: {
-            "ok": False,
-            "bundle": None,
-            "error_type": "auth_code_missing",
-            "error_detail": "未获取到 auth code",
-        },
+        "_register_direct_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("direct registration must not run")),
     )
 
-    def fake_record(*args, **kwargs):
-        recorded["record_args"] = args
-        recorded["record_kwargs"] = kwargs
-        return {"status": "standby", "auth_last_error": "auth_code_missing", "seat_released": True}
-
-    monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
-
-    result = manager.create_account_direct(_FakeMailClient())
-
-    assert result is None
-    assert recorded["added"] == ["user@example.com"]
-    assert recorded["record_args"][:3] == ("user@example.com", "auth_code_missing", "未获取到 auth code")
-    assert recorded["record_kwargs"]["release_team_seat"] is True
+    try:
+        manager.create_account_direct(object())
+    except RuntimeError as exc:
+        assert "swap_seat-only" in str(exc)
+    else:
+        raise AssertionError("expected create_account_direct to be disabled")
 
 
-def test_complete_registration_reuses_one_profile_for_invite_and_oauth(monkeypatch):
+def test_register_with_invite_fails_fast_on_google_signin(monkeypatch):
+    page = _GoogleSignInPage()
+    mail = _NoMail()
+
+    monkeypatch.setattr(invite.time, "sleep", lambda *_args, **_kwargs: None)
+
+    ok, password = invite.register_with_invite(page, "https://invite.example", "user@example.com", mail, password="pw")
+
+    assert ok is False
+    assert password == "pw"
+    assert invite.get_registration_error(page)["type"] == "google_signin_redirect"
+    assert mail.search_calls == 0
+
+
+def test_submit_email_step_skips_continue_with_google(monkeypatch):
+    page = _EmailChoicePage()
+
+    monkeypatch.setattr(invite.time, "sleep", lambda *_args, **_kwargs: None)
+
+    assert invite._submit_email_step(page, "user@example.com") is True
+    assert page.email_input.filled == "user@example.com"
+    assert page.google_clicked is False
+    assert page.submit_clicked is True
+    assert page.url == "https://chatgpt.com/auth/login"
+
+
+def test_complete_registration_reuses_one_profile_and_exports_pat_from_session(monkeypatch):
     profile = SignupProfile("Owen Reed", 1989, 2, 10, 37)
     fake_page = _FakePage(url="https://chatgpt.com")
     captured = {}
+    updates = []
 
     monkeypatch.setattr(manager, "generate_signup_profile", lambda: profile)
     monkeypatch.setattr(
@@ -354,28 +423,45 @@ def test_complete_registration_reuses_one_profile_for_invite_and_oauth(monkeypat
         )[1],
     )
     monkeypatch.setattr(
-        manager,
-        "_login_codex_with_result",
-        lambda email, password, *, mail_client=None, max_attempts=3, signup_profile=None: (
-            captured.setdefault("oauth_profile", signup_profile),
-            {"ok": True, "bundle": {"account_id": "acc-2", "email": email, "plan_type": "team"}},
-        )[1],
+        "autoteam.codex_pat_export.capture_chatgpt_session_from_page",
+        lambda page: {
+            "chatgpt_session_token": "session-token",
+            "access_token": "access-token",
+            "chatgpt_account_id": "acc-2",
+        },
     )
-    monkeypatch.setattr(manager, "save_auth_file", lambda bundle: "/tmp/auth.json")
-    monkeypatch.setattr(manager, "update_account", lambda *args, **kwargs: None)
-    monkeypatch.setattr(manager, "_auth_repair_reset", lambda *args, **kwargs: None)
-    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(fake_page))
+
+    def fake_create_auth(session_token, **kwargs):
+        captured["pat_session_token"] = session_token
+        captured["pat_kwargs"] = kwargs
+        return {"auth_file": "/tmp/auth.json", "filename": "auth.json"}
+
+    monkeypatch.setattr("autoteam.codex_pat_export.create_save_upload_codex_auth_from_session", fake_create_auth)
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager, "new_browser_session", lambda: _FakeBrowserSession(fake_page))
 
     result = manager._complete_registration("user@example.com", "pw", "https://invite", object())
 
     assert result == "user@example.com"
     assert captured["invite_profile"] is profile
-    assert captured["oauth_profile"] is profile
+    assert captured["pat_session_token"] == "session-token"
+    assert captured["pat_kwargs"]["email"] == "user@example.com"
+    assert captured["pat_kwargs"]["account_id"] == "acc-2"
+    assert captured["pat_kwargs"]["upload"] is True
+    assert updates[-1][0] == "user@example.com"
+    assert updates[-1][1]["status"] == "standby"
+    assert updates[-1][1]["auth_file"] == "/tmp/auth.json"
 
 
-def test_complete_registration_releases_team_seat_and_returns_none_when_oauth_fails(monkeypatch):
+def test_complete_registration_prefers_team_context_account_id(monkeypatch):
     fake_page = _FakePage(url="https://chatgpt.com")
-    recorded = {}
+    captured = {}
+    updates = []
+
+    class _Team:
+        account_id = "acc-target"
+        workspace_name = "Target Team"
+        label = "Target Team"
 
     monkeypatch.setattr(manager, "generate_signup_profile", lambda: SignupProfile("Owen Reed", 1989, 2, 10, 37))
     monkeypatch.setattr(
@@ -384,29 +470,82 @@ def test_complete_registration_releases_team_seat_and_returns_none_when_oauth_fa
         lambda page, invite_link, email, mail_client, password=None, signup_profile=None: (True, password),
     )
     monkeypatch.setattr(
-        manager,
-        "_login_codex_with_result",
-        lambda *args, **kwargs: {
-            "ok": False,
-            "bundle": None,
-            "error_type": "choose_account_selection",
-            "error_detail": "卡在账号选择页",
+        "autoteam.codex_pat_export.capture_chatgpt_session_from_page",
+        lambda page: {
+            "chatgpt_session_token": "session-token",
+            "access_token": "access-token",
+            "chatgpt_account_id": "acc-default",
         },
     )
 
-    def fake_record(*args, **kwargs):
-        recorded["record_args"] = args
-        recorded["record_kwargs"] = kwargs
-        return {"status": "standby", "auth_last_error": "choose_account_selection", "seat_released": True}
+    def fake_create_auth(session_token, **kwargs):
+        captured["pat_session_token"] = session_token
+        captured["pat_kwargs"] = kwargs
+        return {"auth_file": "/tmp/auth.json", "filename": "auth.json"}
 
-    monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
-    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(fake_page))
+    monkeypatch.setattr("autoteam.codex_pat_export.create_save_upload_codex_auth_from_session", fake_create_auth)
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager, "new_browser_session", lambda: _FakeBrowserSession(fake_page))
+
+    result = manager._complete_registration("user@example.com", "pw", "https://invite", object(), team_context=_Team())
+
+    assert result == "user@example.com"
+    assert captured["pat_session_token"] == "session-token"
+    assert captured["pat_kwargs"]["account_id"] == "acc-target"
+    assert updates[0][1]["chatgpt_account_id"] == "acc-target"
+    assert updates[-1][1]["chatgpt_account_id"] == "acc-target"
+
+
+def test_complete_registration_marks_auth_pending_when_pat_export_fails(monkeypatch):
+    fake_page = _FakePage(url="https://chatgpt.com")
+    updates = []
+
+    monkeypatch.setattr(manager, "generate_signup_profile", lambda: SignupProfile("Owen Reed", 1989, 2, 10, 37))
+    monkeypatch.setattr(
+        invite,
+        "register_with_invite",
+        lambda page, invite_link, email, mail_client, password=None, signup_profile=None: (True, password),
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_pat_export.capture_chatgpt_session_from_page",
+        lambda page: {"chatgpt_session_token": "session-token", "access_token": "access-token"},
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_pat_export.create_save_upload_codex_auth_from_session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("pat failed")),
+    )
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager, "new_browser_session", lambda: _FakeBrowserSession(fake_page))
+
+    result = manager._complete_registration("user@example.com", "pw", "https://invite", object())
+
+    assert result == "user@example.com"
+    assert updates[-1][0] == "user@example.com"
+    assert updates[-1][1]["status"] == "auth_pending"
+    assert "codex_pat_export_failed" in updates[-1][1]["auth_last_error"]
+
+
+def test_complete_registration_records_registration_failure_as_pending(monkeypatch):
+    fake_page = _FakePage(url="https://accounts.google.com/signin/oauth")
+    updates = []
+
+    monkeypatch.setattr(manager, "generate_signup_profile", lambda: SignupProfile("Owen Reed", 1989, 2, 10, 37))
+
+    def fake_register(page, invite_link, email, mail_client, password=None, signup_profile=None):
+        invite._set_registration_error(page, "google_signin_redirect", "Google sign-in redirect")
+        return False, password
+
+    monkeypatch.setattr(invite, "register_with_invite", fake_register)
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager, "new_browser_session", lambda: _FakeBrowserSession(fake_page))
 
     result = manager._complete_registration("user@example.com", "pw", "https://invite", object())
 
     assert result is None
-    assert recorded["record_args"][:3] == ("user@example.com", "choose_account_selection", "卡在账号选择页")
-    assert recorded["record_kwargs"]["release_team_seat"] is True
+    assert updates[-1][0] == "user@example.com"
+    assert updates[-1][1]["status"] == "pending"
+    assert updates[-1][1]["auth_last_error"] == "google_signin_redirect"
+    assert "Google sign-in redirect" in updates[-1][1]["auth_last_error_detail"]
 
 
 def test_complete_invite_about_you_uses_profile_values(monkeypatch):

@@ -26,7 +26,10 @@ from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.cpa_sync import (
     check_cpa_codex_quota,
     cpa_auth_is_active,
+    cpa_auth_is_disabled,
+    get_managed_cpa_auth_names,
     is_cpa_codex_oauth,
+    is_managed_cpa_auth,
     list_cpa_files,
     set_cpa_auth_disabled,
 )
@@ -45,6 +48,12 @@ SWAP_ACTIVE_MIN = 1
 SWAP_ACTIVE_MAX = 5
 _SWAP_COOLDOWN_LOCK = threading.RLock()
 _SWAP_QUOTA_STATE_LOCK = threading.RLock()
+_QUOTA_WINDOWS = (
+    ("primary", "primary_pct", "primary_resets_at"),
+    ("weekly", "weekly_pct", "weekly_resets_at"),
+    ("monthly", "monthly_pct", "monthly_resets_at"),
+)
+_QUOTA_WINDOW_NAMES = tuple(window for window, _pct_key, _reset_key in _QUOTA_WINDOWS)
 
 
 def _fetch_team_members_for_account(chatgpt_api, account_id: str | None = None):
@@ -282,6 +291,50 @@ def get_swap_seat_whitelist_emails() -> set[str]:
     return parse_email_set(os.environ.get("SWAP_SEAT_WHITELIST_EMAILS", ""))
 
 
+def _truthy_flag(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _explicit_managed_flag(acc: dict | None) -> bool | None:
+    acc = acc or {}
+    if "managed_by_autoteam" not in acc:
+        return None
+    raw = acc.get("managed_by_autoteam")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return _truthy_flag(raw)
+
+
+def _account_looks_autoteam_managed(acc: dict | None) -> bool:
+    """保守识别 AutoTeam 创建的 member，避免误操作外部/主号成员。"""
+    acc = acc or {}
+    explicit_managed = _explicit_managed_flag(acc)
+    if explicit_managed is not None:
+        return explicit_managed
+    if str(acc.get("created_by") or "").lower() == "autoteam":
+        return True
+    if acc.get("mail_account_id") is not None or acc.get("cloudmail_account_id") is not None:
+        return True
+    return False
+
+
+def get_autoteam_managed_member_emails(accounts: list[dict] | None = None) -> set[str]:
+    """返回允许 AutoTeam 修改 seat 的 member 邮箱白名单。"""
+    if accounts is None:
+        try:
+            from autoteam.accounts import load_accounts
+
+            accounts = load_accounts()
+        except Exception:
+            logger.warning("[swap_seat] 读取本地账号失败，本轮将不主动 seat-swap 任何非显式受管成员", exc_info=True)
+            return set()
+    return {
+        normalized_email(acc.get("email"))
+        for acc in accounts or []
+        if isinstance(acc, dict) and _account_looks_autoteam_managed(acc) and normalized_email(acc.get("email"))
+    }
+
+
 def normalize_team_seat_type(value: str | None) -> str:
     raw = str(value or "").strip().lower()
     if raw in {"chatgpt", "default", "standard", "standard-user", "chat"}:
@@ -307,6 +360,11 @@ def cpa_auth_identifier(auth: dict | None) -> str:
         if value:
             return value
     return ""
+
+
+def cpa_auth_email(auth: dict | None) -> str:
+    auth = auth or {}
+    return normalized_email(auth.get("email") or auth.get("account"))
 
 
 def quota_state_key(auth: dict | None, *, account_id: str | None = None) -> str:
@@ -335,25 +393,55 @@ def quota_info_from_result(status: str, info: dict | None) -> dict:
     return {}
 
 
-def quota_remaining_pair(status: str, info: dict | None) -> tuple[int, int]:
+def quota_applicable_windows(status: str, info: dict | None) -> set[str]:
+    """返回该账号真实适用的 quota 窗口；monthly-only 不应被 5h/weekly 限制影响。"""
     quota = quota_info_from_result(status, info)
-    try:
-        primary_remaining = max(0, 100 - int(float(quota.get("primary_pct", 100))))
-    except Exception:
-        primary_remaining = 0
-    try:
-        weekly_remaining = max(0, 100 - int(float(quota.get("weekly_pct", 100))))
-    except Exception:
-        weekly_remaining = 0
-    return primary_remaining, weekly_remaining
+    raw_windows = quota.get("quota_windows")
+    if isinstance(raw_windows, (list, tuple, set)):
+        windows = {str(window or "").strip().lower() for window in raw_windows}
+        return {window for window in windows if window in _QUOTA_WINDOW_NAMES}
+
+    applicable = set()
+    explicit_flags = False
+    for window, _pct_key, _reset_key in _QUOTA_WINDOWS:
+        flag_key = f"{window}_applicable"
+        if flag_key not in quota:
+            continue
+        explicit_flags = True
+        if bool(quota.get(flag_key)):
+            applicable.add(window)
+    if explicit_flags:
+        return applicable
+
+    # Backward compatibility：旧 cache / 旧测试没有 applicability 字段，按旧逻辑三个窗口都适用。
+    return set(_QUOTA_WINDOW_NAMES)
+
+
+def quota_remaining_by_window(status: str, info: dict | None) -> dict[str, int]:
+    quota = quota_info_from_result(status, info)
+    remaining = {}
+    for window, pct_key, _reset_key in _QUOTA_WINDOWS:
+        try:
+            remaining[window] = max(0, 100 - int(float(quota.get(pct_key, 0) or 0)))
+        except Exception:
+            remaining[window] = 0
+    return remaining
+
+
+def quota_remaining_pair(status: str, info: dict | None) -> tuple[int, int]:
+    remaining = quota_remaining_by_window(status, info)
+    return remaining["primary"], remaining["weekly"]
 
 
 def quota_available(status: str, info: dict | None) -> bool:
-    """5h 和 weekly 任何一个耗尽都不可用。"""
+    """任一适用窗口耗尽都不可用；不适用窗口（如 monthly-only 的 5h）不参与判断。"""
     if status != "ok":
         return False
-    primary_remaining, weekly_remaining = quota_remaining_pair(status, info)
-    return primary_remaining > 0 and weekly_remaining > 0
+    applicable = quota_applicable_windows(status, info)
+    if not applicable:
+        return False
+    remaining = quota_remaining_by_window(status, info)
+    return all(remaining[window] > 0 for window in applicable)
 
 
 def _int_ts(value: Any, default: int = 0) -> int:
@@ -367,6 +455,8 @@ def _quota_resets(status: str, info: dict | None) -> dict:
     quota = quota_info_from_result(status, info)
     primary_reset = _int_ts(quota.get("primary_resets_at"))
     weekly_reset = _int_ts(quota.get("weekly_resets_at"))
+    monthly_reset = _int_ts(quota.get("monthly_resets_at"))
+    applicable = quota_applicable_windows(status, info)
     exhausted_until = 0
     window = ""
     if isinstance(info, dict):
@@ -375,16 +465,22 @@ def _quota_resets(status: str, info: dict | None) -> dict:
     if status == "exhausted":
         if not exhausted_until:
             candidates = []
-            if _int_ts(quota.get("primary_pct")) >= 100 and primary_reset:
+            if "primary" in applicable and _int_ts(quota.get("primary_pct")) >= 100 and primary_reset:
                 candidates.append(primary_reset)
-            if _int_ts(quota.get("weekly_pct")) >= 100 and weekly_reset:
+            if "weekly" in applicable and _int_ts(quota.get("weekly_pct")) >= 100 and weekly_reset:
                 candidates.append(weekly_reset)
+            if "monthly" in applicable and _int_ts(quota.get("monthly_pct")) >= 100 and monthly_reset:
+                candidates.append(monthly_reset)
             exhausted_until = max(candidates) if candidates else int(time.time() + 5 * 60 * 60)
         if not window:
-            primary_exhausted = _int_ts(quota.get("primary_pct")) >= 100
-            weekly_exhausted = _int_ts(quota.get("weekly_pct")) >= 100
-            if primary_exhausted and weekly_exhausted:
+            primary_exhausted = "primary" in applicable and _int_ts(quota.get("primary_pct")) >= 100
+            weekly_exhausted = "weekly" in applicable and _int_ts(quota.get("weekly_pct")) >= 100
+            monthly_exhausted = "monthly" in applicable and _int_ts(quota.get("monthly_pct")) >= 100
+            exhausted_count = sum(1 for flag in (primary_exhausted, weekly_exhausted, monthly_exhausted) if flag)
+            if exhausted_count > 1:
                 window = "combined"
+            elif monthly_exhausted:
+                window = "monthly"
             elif weekly_exhausted:
                 window = "weekly"
             elif primary_exhausted:
@@ -395,13 +491,14 @@ def _quota_resets(status: str, info: dict | None) -> dict:
         "quota_info": quota,
         "primary_resets_at": primary_reset,
         "weekly_resets_at": weekly_reset,
+        "monthly_resets_at": monthly_reset,
         "exhausted_until": exhausted_until,
         "window": window,
     }
 
 
 def record_quota_result(auth: dict, status: str, info: dict | None, *, now: float | None = None, account_id: str | None = None) -> dict:
-    """记录每个账号/OAuth 的 quota 快照和 5h/weekly reset 时间。"""
+    """记录每个账号/OAuth 的 quota 快照和 5h/weekly/monthly reset 时间。"""
     now = time.time() if now is None else float(now)
     auth_id = cpa_auth_identifier(auth)
     state_key = quota_state_key(auth, account_id=account_id)
@@ -409,17 +506,24 @@ def record_quota_result(auth: dict, status: str, info: dict | None, *, now: floa
         return {}
     email = normalized_email(auth.get("email") or auth.get("account"))
     resets = _quota_resets(status, info)
-    primary_remaining, weekly_remaining = quota_remaining_pair(status, info)
+    remaining = quota_remaining_by_window(status, info)
+    applicable = quota_applicable_windows(status, info)
     entry = {
         "auth_id": auth_id,
         "account_id": str(account_id or "").strip(),
         "email": email,
         "status": status,
         "quota_available": quota_available(status, info),
-        "primary_remaining": primary_remaining,
-        "weekly_remaining": weekly_remaining,
+        "primary_remaining": remaining["primary"],
+        "weekly_remaining": remaining["weekly"],
+        "monthly_remaining": remaining["monthly"],
+        "primary_applicable": "primary" in applicable,
+        "weekly_applicable": "weekly" in applicable,
+        "monthly_applicable": "monthly" in applicable,
+        "quota_windows": sorted(applicable),
         "primary_resets_at": resets["primary_resets_at"],
         "weekly_resets_at": resets["weekly_resets_at"],
+        "monthly_resets_at": resets["monthly_resets_at"],
         "exhausted_until": resets["exhausted_until"] if status == "exhausted" else 0,
         "window": resets["window"],
         "quota_info": resets["quota_info"],
@@ -431,6 +535,28 @@ def record_quota_result(auth: dict, status: str, info: dict | None, *, now: floa
         state["updated_at"] = int(now)
         _save_swap_quota_state(state)
     return entry
+
+
+def forget_quota_cache_entries(*, auth_id: str | None = None, email: str | None = None) -> dict:
+    """删除指定受管 auth/email 的本地 quota 历史记录。"""
+    auth_id = str(auth_id or "").strip()
+    email = normalized_email(email)
+    removed = []
+    with _SWAP_QUOTA_STATE_LOCK:
+        state = _load_swap_quota_state()
+        auths = state.get("auths") if isinstance(state.get("auths"), dict) else {}
+        for key, entry in list(auths.items()):
+            if not isinstance(entry, dict):
+                continue
+            entry_auth_id = str(entry.get("auth_id") or "").strip()
+            entry_email = normalized_email(entry.get("email"))
+            if (auth_id and entry_auth_id == auth_id) or (email and entry_email == email):
+                removed.append(key)
+                auths.pop(key, None)
+        if removed:
+            state["updated_at"] = int(time.time())
+            _save_swap_quota_state(state)
+    return {"removed": removed, "count": len(removed)}
 
 
 def cached_exhausted_quota_result(auth: dict, *, now: float | None = None, account_id: str | None = None) -> tuple[str, dict] | None:
@@ -483,6 +609,29 @@ def cached_recent_quota_result(auth: dict, *, now: float | None = None, account_
     }
 
 
+def mark_auth_error_for_pat_repair(auth: dict, info: dict | None = None) -> None:
+    """CPA quota 鉴权失败时，把本地账号标成 PAT 待修复。"""
+    email = normalized_email((auth or {}).get("email") or (auth or {}).get("account"))
+    if not email:
+        return
+    try:
+        from autoteam.accounts import STATUS_AUTH_PENDING, update_account
+
+        detail = ""
+        if isinstance(info, dict):
+            detail = str(info.get("error") or info.get("body") or info.get("status_code") or "")
+        update_account(
+            email,
+            status=STATUS_AUTH_PENDING,
+            auth_last_error="cpa_auth_error",
+            auth_last_error_detail=detail[:300] if detail else "CPA quota 检查鉴权失败",
+            auth_last_failed_at=time.time(),
+            managed_by_autoteam=True,
+        )
+    except Exception:
+        logger.debug("[swap_seat] 标记 PAT 待修复失败: %s", email, exc_info=True)
+
+
 def quota_cache_runtime_status(*, now: float | None = None) -> dict:
     """只读返回 swap_seat quota 缓存状态，供 WebUI 展示。
 
@@ -497,6 +646,11 @@ def quota_cache_runtime_status(*, now: float | None = None) -> dict:
         if not isinstance(entry, dict):
             continue
         status = str(entry.get("status") or "")
+        applicable = {
+            window
+            for window in _QUOTA_WINDOW_NAMES
+            if bool(entry.get(f"{window}_applicable", True))
+        }
         updated_at = _int_ts(entry.get("updated_at"))
         exhausted_until = _int_ts(entry.get("exhausted_until"))
         next_check_at = 0
@@ -519,8 +673,14 @@ def quota_cache_runtime_status(*, now: float | None = None) -> dict:
                 "quota_available": bool(entry.get("quota_available")),
                 "primary_remaining": _int_ts(entry.get("primary_remaining")),
                 "weekly_remaining": _int_ts(entry.get("weekly_remaining")),
+                "monthly_remaining": _int_ts(entry.get("monthly_remaining")),
+                "primary_applicable": "primary" in applicable,
+                "weekly_applicable": "weekly" in applicable,
+                "monthly_applicable": "monthly" in applicable,
+                "quota_windows": sorted(applicable),
                 "primary_resets_at": _int_ts(entry.get("primary_resets_at")),
                 "weekly_resets_at": _int_ts(entry.get("weekly_resets_at")),
+                "monthly_resets_at": _int_ts(entry.get("monthly_resets_at")),
                 "exhausted_until": exhausted_until,
                 "window": entry.get("window") or "",
                 "updated_at": updated_at,
@@ -564,7 +724,7 @@ def _auth_sort_key(auth: dict) -> tuple:
     """同一邮箱多个 CPA OAuth 时，优先选择当前可用且较新的。"""
     return (
         1 if cpa_auth_is_active(auth) else 0,
-        0 if bool(auth.get("disabled", False)) else 1,
+        0 if cpa_auth_is_disabled(auth) else 1,
         0 if str(auth.get("status") or "").lower() in {"error", "unknown"} else 1,
         _parse_time_score(auth.get("last_refresh") or auth.get("updated_at") or auth.get("modtime")),
         1 if cpa_auth_index(auth) else 0,
@@ -585,11 +745,13 @@ def _best_auth_for_quota(auths: list[dict], quota_results: dict[str, tuple[str, 
     def _key(auth: dict) -> tuple:
         auth_id = cpa_auth_identifier(auth)
         status, info = quota_results.get(auth_id, ("auth_error", None))
-        primary_remaining, weekly_remaining = quota_remaining_pair(status, info)
+        remaining = quota_remaining_by_window(status, info)
+        applicable = quota_applicable_windows(status, info)
+        applicable_remaining = [remaining[window] for window in applicable] or [0]
         return (
             1 if quota_available(status, info) else 0,
-            min(primary_remaining, weekly_remaining),
-            primary_remaining + weekly_remaining,
+            min(applicable_remaining),
+            sum(applicable_remaining),
             *_auth_sort_key(auth),
         )
 
@@ -604,37 +766,71 @@ def build_swap_plan(
     max_chatgpt_active: int = 2,
     forced_codex_emails: set[str] | None = None,
     whitelist_emails: set[str] | None = None,
+    managed_auth_names: set[str] | None = None,
+    managed_emails: set[str] | None = None,
 ) -> dict:
     """根据 Team member + CPA quota 生成无副作用切换计划。"""
     # 硬上限：无论 API/CLI/前端传什么，ChatGPT seat / CPA OAuth active 只能保留 1~5 个。
     max_chatgpt_active = normalize_active_limit(max_chatgpt_active)
     forced_codex_emails = {normalized_email(email) for email in (forced_codex_emails or set()) if normalized_email(email)}
     whitelist_emails = {normalized_email(email) for email in (whitelist_emails or set()) if normalized_email(email)}
+    managed_email_scope = None
+    if managed_emails is not None:
+        managed_email_scope = {normalized_email(email) for email in managed_emails if normalized_email(email)}
 
     auths_by_email: dict[str, list[dict]] = defaultdict(list)
-    codex_auths = [auth for auth in cpa_auths if is_cpa_codex_oauth(auth)]
+    all_codex_auths = [auth for auth in cpa_auths if is_cpa_codex_oauth(auth)]
+    if managed_auth_names is None:
+        name_managed_codex_auths = all_codex_auths
+    else:
+        name_managed_codex_auths = [auth for auth in all_codex_auths if is_managed_cpa_auth(auth, managed_auth_names)]
+    if managed_email_scope is None:
+        codex_auths = name_managed_codex_auths
+    else:
+        codex_auths = [auth for auth in name_managed_codex_auths if cpa_auth_email(auth) in managed_email_scope]
+    eligible_auth_object_ids = {id(auth) for auth in codex_auths}
+    unmanaged_codex_auths = [auth for auth in all_codex_auths if id(auth) not in eligible_auth_object_ids]
     for auth in codex_auths:
-        email = normalized_email(auth.get("email") or auth.get("account"))
+        email = cpa_auth_email(auth)
         if email:
             auths_by_email[email].append(auth)
 
     member_states = []
     seen_team_emails = set()
     whitelisted_chatgpt_seats = 0
+    protected_team_emails = set()
+    protected_chatgpt_seats = 0
+    current_team_chatgpt_seats = 0
     for member in team_members:
         email = normalized_email(member.get("email"))
         if not email:
             continue
         seen_team_emails.add(email)
         current_seat = normalize_team_seat_type(member.get("seat_type"))
+        if current_seat == "chatgpt":
+            current_team_chatgpt_seats += 1
         if email in whitelist_emails:
             if current_seat == "chatgpt":
                 whitelisted_chatgpt_seats += 1
             continue
-        auth = _best_auth_for_quota(auths_by_email.get(email, []), quota_results)
+        email_auths = auths_by_email.get(email, [])
+        if managed_email_scope is not None:
+            managed_member = email in managed_email_scope or bool(email_auths)
+        elif managed_auth_names is not None:
+            managed_member = bool(email_auths)
+        else:
+            managed_member = True
+        if not managed_member:
+            protected_team_emails.add(email)
+            if current_seat == "chatgpt":
+                protected_chatgpt_seats += 1
+            continue
+        auth = _best_auth_for_quota(email_auths, quota_results)
         auth_id = cpa_auth_identifier(auth)
         quota_status, quota_info = quota_results.get(auth_id, ("auth_error", {"error": "missing_quota"}))
-        primary_remaining, weekly_remaining = quota_remaining_pair(quota_status, quota_info)
+        remaining = quota_remaining_by_window(quota_status, quota_info)
+        applicable = quota_applicable_windows(quota_status, quota_info)
+        applicable_remaining = [remaining[window] for window in applicable] or [0]
         available = bool(auth) and quota_available(quota_status, quota_info)
         force_codex = email in forced_codex_emails
         if force_codex:
@@ -650,9 +846,14 @@ def build_swap_plan(
                 "quota_info": quota_info,
                 "quota_available": available,
                 "force_codex": force_codex,
-                "primary_remaining": primary_remaining,
-                "weekly_remaining": weekly_remaining,
-                "score": min(primary_remaining, weekly_remaining),
+                "primary_remaining": remaining["primary"],
+                "weekly_remaining": remaining["weekly"],
+                "monthly_remaining": remaining["monthly"],
+                "primary_applicable": "primary" in applicable,
+                "weekly_applicable": "weekly" in applicable,
+                "monthly_applicable": "monthly" in applicable,
+                "quota_windows": sorted(applicable),
+                "score": min(applicable_remaining),
                 "current_seat": current_seat,
                 "current_oauth_active": current_oauth_active,
             }
@@ -661,22 +862,34 @@ def build_swap_plan(
     whitelisted_active_oauths = sum(
         1
         for auth in codex_auths
-        if normalized_email(auth.get("email") or auth.get("account")) in whitelist_emails and cpa_auth_is_active(auth)
+        if cpa_auth_email(auth) in whitelist_emails and cpa_auth_is_active(auth)
+    )
+    unmanaged_active_oauths = sum(1 for auth in unmanaged_codex_auths if cpa_auth_is_active(auth))
+    protected_active_oauths = sum(
+        1
+        for auth in unmanaged_codex_auths
+        if cpa_auth_is_active(auth) and cpa_auth_email(auth) in seen_team_emails
     )
 
-    # 选择最多 max_chatgpt_active 个 quota 可用成员。优先保证两个窗口的最小剩余量最高，平分时减少 seat/OAuth 抖动。
+    # 选择最多 max_chatgpt_active 个 quota 可用成员。优先保证各 quota 窗口的最小剩余量最高，平分时减少 seat/OAuth 抖动。
     eligible = [state for state in member_states if state["quota_available"]]
     eligible.sort(
         key=lambda state: (
             state["score"],
-            state["primary_remaining"] + state["weekly_remaining"],
+            state["primary_remaining"] + state["weekly_remaining"] + state["monthly_remaining"],
             1 if state["current_seat"] == "chatgpt" else 0,
             1 if state["current_oauth_active"] else 0,
             state["email"],
         ),
         reverse=True,
     )
-    managed_active_limit = max(0, min(max_chatgpt_active - whitelisted_chatgpt_seats, max_chatgpt_active - whitelisted_active_oauths))
+    managed_active_limit = max(
+        0,
+        min(
+            max_chatgpt_active - whitelisted_chatgpt_seats - protected_chatgpt_seats,
+            max_chatgpt_active - whitelisted_active_oauths - protected_active_oauths,
+        ),
+    )
     selected_emails = {state["email"] for state in eligible[:managed_active_limit]}
     selected_auth_ids = {state["auth_id"] for state in eligible[:managed_active_limit] if state.get("auth_id")}
 
@@ -699,6 +912,11 @@ def build_swap_plan(
             "force_codex": state.get("force_codex", False),
             "primary_remaining": state["primary_remaining"],
             "weekly_remaining": state["weekly_remaining"],
+            "monthly_remaining": state["monthly_remaining"],
+            "primary_applicable": state["primary_applicable"],
+            "weekly_applicable": state["weekly_applicable"],
+            "monthly_applicable": state["monthly_applicable"],
+            "quota_windows": state["quota_windows"],
             "auth_id": state["auth_id"],
         }
         seat_actions.append(action)
@@ -711,7 +929,7 @@ def build_swap_plan(
         if email in whitelist_emails:
             continue
         desired_disabled = auth_id not in selected_auth_ids
-        current_disabled = bool(auth.get("disabled", False))
+        current_disabled = cpa_auth_is_disabled(auth)
         status = str(auth.get("status") or "").strip().lower()
         # 有些 CPA 列表不返回 status；只在 status 明确存在且不是 active/enabled 时才强制刷新，
         # 避免 disabled=false 但 status 为空的条目被每轮误判为需要 enable。
@@ -740,12 +958,22 @@ def build_swap_plan(
         "seat_actions": seat_actions,
         "oauth_actions": oauth_actions,
         "summary": {
-            "team_members": len(member_states),
+            "team_members": len(seen_team_emails),
+            "managed_team_members": len(member_states),
             "whitelisted_team_members": len(seen_team_emails & whitelist_emails),
             "whitelisted_chatgpt_seats": whitelisted_chatgpt_seats,
+            "protected_team_members": len(protected_team_emails),
+            "protected_chatgpt_seats": protected_chatgpt_seats,
+            "current_chatgpt_seats": current_team_chatgpt_seats,
+            "managed_current_chatgpt_seats": sum(1 for state in member_states if state["current_seat"] == "chatgpt"),
             "cpa_codex_oauth": len(codex_auths),
-            "whitelisted_cpa_oauth": sum(1 for auth in codex_auths if normalized_email(auth.get("email") or auth.get("account")) in whitelist_emails),
+            "managed_cpa_codex_oauth": len(codex_auths),
+            "unmanaged_cpa_codex_oauth": len(unmanaged_codex_auths),
+            "unmanaged_active_oauth": unmanaged_active_oauths,
+            "protected_active_oauth": protected_active_oauths,
+            "whitelisted_cpa_oauth": sum(1 for auth in codex_auths if cpa_auth_email(auth) in whitelist_emails),
             "whitelisted_active_oauth": whitelisted_active_oauths,
+            "current_active_oauth": sum(1 for state in member_states if state["current_oauth_active"]),
             "managed_active_capacity": managed_active_limit,
             "quota_available": len(eligible),
             "selected_chatgpt": len(selected_emails),
@@ -786,13 +1014,22 @@ def _team_result_context(team_context=None, account_id: str | None = None) -> di
     }
 
 
-def force_existing_members_to_codex(chatgpt_api, *, whitelist_emails: set[str] | None = None, account_id: str | None = None) -> dict:
-    """邀请/注册新号前的安全收敛：把旧成员切成 Codex seat。
+def force_existing_members_to_codex(
+    chatgpt_api,
+    *,
+    whitelist_emails: set[str] | None = None,
+    managed_emails: set[str] | None = None,
+    account_id: str | None = None,
+) -> dict:
+    """遗留兜底：只允许把 AutoTeam 自管成员切成 Codex seat。
 
     只调用 PATCH /users/{id} 修改 seat_type；不读取/取消 invite，不 kick/remove。
-    白名单成员完全跳过，不检查额度也不切换 seat。
+    白名单与非自管成员完全跳过，不检查额度也不切换 seat。
     """
     whitelist_emails = {normalized_email(email) for email in (whitelist_emails or set()) if normalized_email(email)}
+    if managed_emails is None:
+        managed_emails = get_autoteam_managed_member_emails()
+    managed_emails = {normalized_email(email) for email in (managed_emails or set()) if normalized_email(email)}
     members = _fetch_team_members_for_account(chatgpt_api, account_id)
     results = []
     for member in members:
@@ -811,6 +1048,10 @@ def force_existing_members_to_codex(chatgpt_api, *, whitelist_emails: set[str] |
         }
         if email in whitelist_emails:
             action["result"] = "whitelisted"
+            results.append(action)
+            continue
+        if email not in managed_emails:
+            action["result"] = "protected_unmanaged"
             results.append(action)
             continue
         if current_seat == "codex":
@@ -835,16 +1076,18 @@ def force_existing_members_to_codex(chatgpt_api, *, whitelist_emails: set[str] |
     return {
         "mode": "pre_invite_codex_sweep",
         "whitelist_emails": sorted(whitelist_emails),
+        "managed_emails": sorted(managed_emails),
         "summary": {
             "team_members": len([item for item in results if item.get("email")]),
             "updated": sum(1 for item in results if item.get("result") == "updated"),
             "failed": sum(1 for item in results if item.get("result") == "failed"),
             "whitelisted": sum(1 for item in results if item.get("result") == "whitelisted"),
+            "protected_unmanaged": sum(1 for item in results if item.get("result") == "protected_unmanaged"),
             "remaining_chatgpt": sum(
                 1
                 for item in results
                 if item.get("current_seat") == "chatgpt"
-                and (item.get("result") in {"whitelisted", "failed", "skipped"})
+                and (item.get("result") in {"whitelisted", "protected_unmanaged", "failed", "skipped"})
             ),
         },
         "seat_results": results,
@@ -895,9 +1138,36 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
 
         logger.info("[swap_seat] 从 CPA 读取 OAuth/auth-files...")
         cpa_auths = list_cpa_files()
-        codex_auths = [auth for auth in cpa_auths if is_cpa_codex_oauth(auth)]
-
         team_emails = {normalized_email(m.get("email")) for m in team_members if normalized_email(m.get("email"))}
+        all_codex_auths = [auth for auth in cpa_auths if is_cpa_codex_oauth(auth)]
+        managed_auth_names = get_managed_cpa_auth_names()
+        name_managed_codex_auths = [auth for auth in all_codex_auths if is_managed_cpa_auth(auth, managed_auth_names)]
+        local_managed_member_emails = get_autoteam_managed_member_emails()
+        managed_auth_emails = {
+            cpa_auth_email(auth)
+            for auth in name_managed_codex_auths
+            if cpa_auth_email(auth)
+        }
+        all_managed_member_emails = local_managed_member_emails | managed_auth_emails
+        # 多 Team 共用同一 CPA 时，当前 Team 的 swap 不应 disable 其他 Team 的自管 OAuth。
+        #
+        # 正常情况下受管 member 来自 accounts.json；如果运行态账号池损坏/为空，
+        # 受管 CPA auth registry 仍能作为保守兜底：只信任本系统登记过的 auth，
+        # 并且只在该邮箱确实属于当前 Team 时才参与 seat/OAuth 调度。
+        managed_member_emails = all_managed_member_emails & team_emails
+        codex_auths = [auth for auth in name_managed_codex_auths if cpa_auth_email(auth) in managed_member_emails]
+        unmanaged_codex_auths = len(all_codex_auths) - len(codex_auths)
+        if unmanaged_codex_auths:
+            logger.info(
+                "[swap_seat] CPA Codex OAuth: self-managed=%d protected/unmanaged=%d；非自管 auth 只读忽略，不查 quota、不启停",
+                len(codex_auths),
+                unmanaged_codex_auths,
+            )
+        logger.info(
+            "[swap_seat] 当前 Team 自管 member %d/%d 个；非当前 Team/非自管 member 只读保护，不做 seat/OAuth 修改",
+            len(managed_member_emails),
+            len(all_managed_member_emails),
+        )
         quota_results: dict[str, tuple[str, dict | None]] = {}
         for auth in codex_auths:
             _abort_if_cancel_requested()
@@ -928,24 +1198,28 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
             if cached:
                 quota_results[auth_id] = cached
                 status, info = cached
-                primary_remaining, weekly_remaining = quota_remaining_pair(status, info)
+                remaining = quota_remaining_by_window(status, info)
                 logger.info(
-                    "[swap_seat] quota %s: cached recent ok 5h=%d%% weekly=%d%%，避免频繁检查 CPA quota",
+                    "[swap_seat] quota %s: cached recent ok 5h=%d%% weekly=%d%% monthly=%d%%，避免频繁检查 CPA quota",
                     email or auth_id,
-                    primary_remaining,
-                    weekly_remaining,
+                    remaining["primary"],
+                    remaining["weekly"],
+                    remaining["monthly"],
                 )
                 continue
             status, info = check_cpa_codex_quota(auth, account_id=account_id)
             quota_results[auth_id] = (status, info)
             record_quota_result(auth, status, info, account_id=account_id)
-            primary_remaining, weekly_remaining = quota_remaining_pair(status, info)
+            if status == "auth_error":
+                mark_auth_error_for_pat_repair(auth, info)
+            remaining = quota_remaining_by_window(status, info)
             logger.info(
-                "[swap_seat] quota %s: status=%s 5h=%d%% weekly=%d%%",
+                "[swap_seat] quota %s: status=%s 5h=%d%% weekly=%d%% monthly=%d%%",
                 email or auth_id,
                 status,
-                primary_remaining,
-                weekly_remaining,
+                remaining["primary"],
+                remaining["weekly"],
+                remaining["monthly"],
             )
 
         plan = build_swap_plan(
@@ -955,11 +1229,17 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
             max_chatgpt_active=max_chatgpt_active,
             forced_codex_emails=forced_codex_emails,
             whitelist_emails=whitelist_emails,
+            managed_auth_names=managed_auth_names,
+            managed_emails=managed_member_emails,
         )
         summary = plan["summary"]
+        no_quota_available = summary["quota_available"] <= 0
 
-        if summary["quota_available"] <= 0:
-            logger.warning("[swap_seat] 没有任何 quota 可用账号，本轮不 swap、不切 seat、不启停 CPA OAuth")
+        has_pending_updates = any(action["needs_update"] for action in plan["seat_actions"]) or any(
+            action["needs_update"] for action in plan["oauth_actions"]
+        )
+        if no_quota_available and not has_pending_updates:
+            logger.warning("[swap_seat] 没有任何 quota 可用账号，且 seat/OAuth 已全部处于 Codex/disabled 状态")
             return {
                 "mode": "swap_seat",
                 "skipped": True,
@@ -973,6 +1253,8 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
                 "seat_results": [],
                 "oauth_results": [],
             }
+        if no_quota_available:
+            logger.warning("[swap_seat] 没有任何 quota 可用账号，仅执行 Codex seat / CPA OAuth disabled 安全收敛")
 
         logger.info(
             "[swap_seat] 计划: selected=%d/%d, to_chatgpt=%d, to_codex=%d, oauth_enable=%d, oauth_disable=%d",
@@ -1036,6 +1318,26 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
                 logger.warning("[swap_seat] %s seat 切换失败: %s", action["email"], action["error"])
             seat_results.append(action)
 
+        chatgpt_ready_emails = {
+            normalized_email(action.get("email"))
+            for action in seat_results
+            if action.get("desired_seat") == "chatgpt" and action.get("result") in {"updated", "unchanged"}
+        }
+        for action in plan["oauth_actions"]:
+            if action.get("desired_disabled") or normalized_email(action.get("email")) in chatgpt_ready_emails:
+                continue
+            action["desired_disabled"] = True
+            action["desired_status"] = "disabled"
+            action["needs_update"] = not cpa_auth_is_disabled(
+                {
+                    "disabled": action.get("current_disabled"),
+                    "status": action.get("status"),
+                }
+            )
+            action["blocked_enable_reason"] = "team_seat_not_chatgpt"
+        summary["oauth_enable"] = sum(1 for action in plan["oauth_actions"] if not action["desired_disabled"] and action["needs_update"])
+        summary["oauth_disable"] = sum(1 for action in plan["oauth_actions"] if action["desired_disabled"] and action["needs_update"])
+
         oauth_results = []
         # 先 disable 其他 OAuth，最后 enable 选中的目标账号，避免中间态 active 超过保留数。
         oauth_actions = sorted(plan["oauth_actions"], key=lambda a: 0 if a["desired_disabled"] else 1)
@@ -1064,7 +1366,7 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
                 logger.warning("[swap_seat] CPA OAuth %s 更新失败: %s", action["email"] or action["name"], exc)
             oauth_results.append(action)
 
-        return {
+        result = {
             "mode": "swap_seat",
             "team": _team_result_context(team_context, account_id),
             "max_chatgpt_active": max_chatgpt_active,
@@ -1082,6 +1384,9 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
             "seat_results": seat_results,
             "oauth_results": oauth_results,
         }
+        if no_quota_available:
+            result["reason"] = "no_quota_available_cleanup"
+        return result
     finally:
         if started_here and _chatgpt_session_ready(managed_chatgpt):
             managed_chatgpt.stop()

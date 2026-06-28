@@ -4,16 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from autoteam.accounts import find_account, load_accounts, save_accounts
 from autoteam.admin_state import get_chatgpt_account_id
-from autoteam.mail_provider import (
-    get_account_mail_account_id,
-    get_account_mail_provider,
-    get_account_mail_service_id,
-    get_mail_client_for_account,
-)
-from autoteam.sync_targets import delete_account_from_configured_targets
-from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
 logger = logging.getLogger(__name__)
 
@@ -68,22 +59,79 @@ def _resolve_account_id(chatgpt_api=None, account_id=None):
     return resolved
 
 
+def _extract_collection(data, *keys):
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _int_value(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _fetch_paginated_collection(chatgpt_api, base_path, label, *keys, limit=25):
+    items = []
+    offset = 0
+    limit = max(1, int(limit or 25))
+    while True:
+        path = f"{base_path}?offset={offset}&limit={limit}&query="
+        resp = chatgpt_api._api_fetch("GET", path)
+        data = _parse_team_api_json(resp, label)
+        page_items = _extract_collection(data, *keys)
+        items.extend(page_items)
+
+        if not isinstance(data, dict):
+            break
+        total = _int_value(data.get("total"), len(items))
+        page_limit = _int_value(data.get("limit"), limit) or limit
+        page_offset = _int_value(data.get("offset"), offset)
+        next_offset = page_offset + page_limit
+        if not page_items or len(items) >= total or next_offset <= offset:
+            break
+        offset = next_offset
+    return items
+
+
 def fetch_team_members(chatgpt_api, account_id=None):
     """只读 Team 成员列表；不读取/处理 invite。"""
     account_id = _resolve_account_id(chatgpt_api, account_id)
-    users_resp = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/users")
-    data = _parse_team_api_json(users_resp, "Team 成员")
-    return data.get("items", data.get("users", data.get("members", [])))
+    return _fetch_paginated_collection(
+        chatgpt_api,
+        f"/backend-api/accounts/{account_id}/users",
+        "Team 成员",
+        "items",
+        "users",
+        "members",
+    )
+
+
+def fetch_team_invites(chatgpt_api, account_id=None):
+    """只读 Team pending invite 列表。"""
+    account_id = _resolve_account_id(chatgpt_api, account_id)
+    return _fetch_paginated_collection(
+        chatgpt_api,
+        f"/backend-api/accounts/{account_id}/invites",
+        "Team 邀请",
+        "items",
+        "invites",
+        "account_invites",
+    )
 
 
 def fetch_team_state(chatgpt_api, account_id=None):
     """读取 Team 成员和邀请状态（只读；保留给展示页兼容）。"""
     account_id = _resolve_account_id(chatgpt_api, account_id)
     members = fetch_team_members(chatgpt_api, account_id=account_id)
-
-    invites_resp = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/invites")
-    data = _parse_team_api_json(invites_resp, "Team 邀请")
-    invites = data if isinstance(data, list) else data.get("invites", data.get("account_invites", []))
+    invites = fetch_team_invites(chatgpt_api, account_id=account_id)
 
     return members, invites
 

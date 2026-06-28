@@ -54,6 +54,7 @@ class TeamContext:
     enabled: bool = True
     max_chatgpt_active: int = 2
     pending_invite_email: str = ""
+    invite_domains: str = ""
 
     @property
     def label(self) -> str:
@@ -92,6 +93,13 @@ def _coerce_team_context(item: dict, defaults: dict, index: int) -> TeamContext 
             item.get("max_chatgpt_active", item.get("target_seats", defaults.get("max_chatgpt_active", 2)))
         ),
         pending_invite_email=_normalized_email(item.get("pending_invite_email") or item.get("pendingInviteEmail")),
+        invite_domains=str(
+            item.get("invite_domains")
+            or item.get("inviteDomains")
+            or item.get("invite_domain")
+            or item.get("inviteDomain")
+            or ""
+        ).strip(),
     )
 
 

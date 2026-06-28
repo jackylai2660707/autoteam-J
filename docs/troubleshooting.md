@@ -32,19 +32,19 @@ AutoTeam 会记录 exhausted 的 reset 时间。未到 reset 前不会重复检�
 1. 已加入 Team member 列表。
 2. CPA 中已经出现该邮箱的 Codex OAuth/auth-file。
 3. CPA quota 检查显示 5h 和 weekly 都有剩余。
-4. 预切旧成员 Codex 成功，未超过 ChatGPT active 上限。
+4. 注册前只读检查确认当前仍未达到 GPT active 目标。
 
 ## pending invite 没有被消费
 
 只有这些条件同时满足才会消费：
 
-- 当前 Team 所有非白名单成员 quota 都耗尽。
+- 当前 Team 在 swap 后有效 GPT seat 低于目标保留数。
 - 操作开启 `replace_with_pending_invite`。
 - Team pending invite 列表中有 CFMail 邮箱。
 - 可以从 CFMail 读取 invite 邮件。
-- 注册前旧成员能预切 Codex。
+- 注册前只读检查未达到 GPT active 目标。
 
-AutoTeam 不会创建新的 invite，也不会取消已有 invite。
+默认 `pending_invite` 自动补位不会创建新的 invite，也不会取消已有 invite。如需自动创建新 invite，请设置 `AUTO_CHECK_REPLACE_MODE=create_invite`；手动创建可使用 Seat 调度页的“新增 invite 注册”或 `uv run autoteam invite-add 2 --force-create-invite`。
 
 ## 手动 enable CPA OAuth 报 410
 

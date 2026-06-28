@@ -38,20 +38,21 @@
         </span>
         <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">成员: <span class="text-white font-medium">{{ data.total }}</span></span>
         <span v-if="data.invites > 0" class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">待接受邀请: <span class="text-yellow-400 font-medium">{{ data.invites }}</span></span>
-        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">OAuth active: <span class="text-emerald-400 font-medium">{{ memberOAuthSummary.active }}</span></span>
-        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">quota 可用: <span class="text-emerald-400 font-medium">{{ memberQuotaSummary.available }}</span></span>
-        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">quota 耗尽缓存: <span class="text-amber-400 font-medium">{{ memberQuotaSummary.exhausted }}</span></span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">受管 OAuth active: <span class="text-emerald-400 font-medium">{{ memberOAuthSummary.active }}</span></span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">受管 quota 可用: <span class="text-emerald-400 font-medium">{{ memberQuotaSummary.available }}</span></span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">受管 quota 耗尽记录: <span class="text-amber-400 font-medium">{{ memberQuotaSummary.exhausted }}</span></span>
+        <span v-if="cpaProtectedUnmanaged" class="px-3 py-1.5 bg-amber-500/10 rounded-lg text-amber-300">已保护外部 auth: <span class="font-medium">{{ cpaProtectedUnmanaged }}</span></span>
       </div>
       <div class="px-4 py-3 rounded-lg text-sm bg-blue-500/10 text-blue-300 border border-blue-500/20">
         当前已按 <code class="px-1 rounded bg-gray-900/70">swap_seat</code> 模式展示：不会移出成员，也不会取消邀请。
-        成员行会合并 CPA OAuth 与 quota cache；pending invite 可手动消费对应 CF 邮箱完成注册，注册前旧成员切 Codex，注册后新号切 GPT。
+        成员行只合并 AutoTeam 受管 CPA OAuth 与受管 quota 记录；外部 auth / 非受管成员只保护，不使用、不启停、不删除。
       </div>
       <div
         v-if="selectedTeam"
         class="flex flex-wrap gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-gray-300"
       >
         <span class="font-medium text-white">当前目标：{{ currentTeamLabel }}</span>
-        <span class="rounded bg-gray-900/70 px-2 py-0.5">active {{ selectedTeam.max_chatgpt_active || 2 }}</span>
+        <span class="rounded bg-gray-900/70 px-2 py-0.5">目标 active {{ selectedTeam.max_chatgpt_active || 2 }}</span>
         <span class="rounded bg-gray-900/70 px-2 py-0.5">{{ selectedTeam.session_present ? '独立 session' : '共享默认 session' }}</span>
         <span v-if="selectedTeam.pending_invite_email" class="rounded bg-amber-500/10 px-2 py-0.5 text-amber-200">
           指定 pending {{ selectedTeam.pending_invite_email }}
@@ -76,7 +77,7 @@
                 <th class="px-4 py-3 font-medium">类型</th>
                 <th class="px-4 py-3 font-medium">Seat</th>
                 <th class="px-4 py-3 font-medium">CPA OAuth</th>
-                <th class="px-4 py-3 font-medium">Quota cache</th>
+                <th class="px-4 py-3 font-medium">受管 quota 记录</th>
                 <th class="px-4 py-3 font-medium">来源</th>
                 <th class="px-4 py-3 font-medium text-right">操作</th>
               </tr>
@@ -127,7 +128,7 @@
                     </div>
                   </div>
                   <div v-else class="text-gray-500">
-                    无记录；下次 swap_seat 会先检查
+                    无受管记录；下次 swap_seat 会先检查受管 auth
                   </div>
                 </td>
                 <td class="px-4 py-3">
@@ -189,6 +190,7 @@ const messageClass = ref('')
 const actionLoading = ref('')
 const runtimeStatus = ref(null)
 const cpaAuths = ref([])
+const cpaFilesSummary = ref({})
 const teamSelectorReady = ref(false)
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const enabledTeams = computed(() => teams.value.filter(team => team.enabled !== false))
@@ -209,6 +211,7 @@ const memberOAuthSummary = computed(() => {
     active: members.filter(item => oauthActiveFor(item)).length,
   }
 })
+const cpaProtectedUnmanaged = computed(() => Number(cpaFilesSummary.value?.protected_unmanaged || 0))
 
 const CACHE_PREFIX = 'autoteam_team_members'
 
@@ -286,6 +289,7 @@ function quotaEntryFor(member) {
   const email = normalizedEmail(member?.email)
   const scope = currentAccountScope()
   if (!email) return null
+  if (!cpaAuthsFor(member).length) return null
   const scoped = quotaEntries.value.find(entry => normalizedEmail(entry.email) === email && (!scope || entry.account_id === scope))
   if (scoped) return scoped
   return quotaEntries.value.find(entry => normalizedEmail(entry.email) === email) || null
@@ -327,6 +331,7 @@ async function fetchMembers() {
     data.value = membersResult
     runtimeStatus.value = runtimeResult
     cpaAuths.value = Array.isArray(cpaResult) ? cpaResult : Array.isArray(cpaResult?.files) ? cpaResult.files : []
+    cpaFilesSummary.value = cpaResult?.summary || {}
     saveCache(data.value)
   } catch (e) {
     error.value = e.message

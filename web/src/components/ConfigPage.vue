@@ -258,11 +258,14 @@
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                <div v-if="runtimeFieldHint(field.key)" class="mt-1 text-[11px] font-normal leading-5 text-slate-500 break-all">
+                  {{ runtimeFieldHint(field.key) }}
+                </div>
               </label>
               <input
                 v-model="runtimeForm[field.key]"
                 :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
+                :placeholder="runtimeFieldPlaceholder(field)"
                 class="input-dark"
               />
             </div>
@@ -280,8 +283,8 @@
             <div v-for="field in cpaArchivedFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
-                <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
-                  {{ sub2apiFieldHint(field.key) }}
+                <div v-if="runtimeFieldHint(field.key)" class="mt-1 text-[11px] font-normal leading-5 text-slate-500 break-all">
+                  {{ runtimeFieldHint(field.key) }}
                 </div>
               </label>
               <select
@@ -306,7 +309,7 @@
                 v-model="runtimeForm[field.key]"
                 :type="fieldInputType(field.key)"
                 :step="fieldInputStep(field.key)"
-                :placeholder="field.default || ''"
+                :placeholder="runtimeFieldPlaceholder(field)"
                 class="input-dark"
               />
             </div>
@@ -347,11 +350,14 @@
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                <div v-if="runtimeFieldHint(field.key)" class="mt-1 text-[11px] font-normal leading-5 text-slate-500 break-all">
+                  {{ runtimeFieldHint(field.key) }}
+                </div>
               </label>
               <input
                 v-model="runtimeForm[field.key]"
                 :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
+                :placeholder="runtimeFieldPlaceholder(field)"
                 class="input-dark"
               />
             </div>
@@ -459,6 +465,30 @@
                   <input v-model.trim="team.pending_invite_email" type="email" placeholder="pending@example.com" class="input-dark" />
                 </label>
 
+                <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 md:col-span-2">
+                  <span class="mb-2 block text-sm font-medium text-slate-300">create invite 域名池（可选）</span>
+                  <textarea
+                    v-model.trim="team.invite_domains"
+                    rows="3"
+                    spellcheck="false"
+                    placeholder="例如：pool-a.example.com; *.pool-b.example.com"
+                    class="input-dark font-mono text-xs"
+                  ></textarea>
+                  <span class="mt-2 block text-xs leading-5 text-slate-500">
+                    支持逗号、分号或换行分隔多个域名；create invite 时会按 round robin 轮询选择，`*.a.com`、`{random}.a.com`、`xxxxx.a.com`
+                    会自动启用随机子域名。
+                  </span>
+                  <div v-if="inviteDomainOptions(team.invite_domains).length" class="mt-3 flex flex-wrap gap-2">
+                    <span
+                      v-for="(option, optionIndex) in inviteDomainOptions(team.invite_domains)"
+                      :key="`${team._key}-invite-domain-${optionIndex}`"
+                      class="rounded bg-emerald-500/10 px-2 py-1 font-mono text-[11px] text-emerald-200"
+                    >
+                      #{{ optionIndex + 1 }} {{ option.enable_random_subdomain ? '*.' : '' }}{{ option.domain }}
+                    </span>
+                  </div>
+                </label>
+
                 <label class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
                   <span class="mb-2 block text-sm font-medium text-slate-300">管理员邮箱（可选）</span>
                   <input v-model.trim="team.email" type="email" placeholder="默认继承当前管理员邮箱" class="input-dark" />
@@ -507,6 +537,9 @@
               {{ field.prompt }}
               <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
               <span v-if="field.key === 'API_KEY'" class="ml-1 text-xs text-slate-500">（留空自动生成）</span>
+              <div v-if="runtimeFieldHint(field.key)" class="mt-1 text-[11px] font-normal leading-5 text-slate-500 break-all">
+                {{ runtimeFieldHint(field.key) }}
+              </div>
             </label>
             <textarea
               v-if="fieldUsesTextarea(field.key)"
@@ -520,7 +553,7 @@
               v-else
               v-model="runtimeForm[field.key]"
               :type="fieldInputType(field.key)"
-              :placeholder="field.default || ''"
+              :placeholder="runtimeFieldPlaceholder(field)"
               class="input-dark"
             />
           </div>
@@ -696,8 +729,8 @@ const runtimeCategoryMeta = {
     icon: '🏢',
     badge: 'Multi Team',
     title: '多 Team 管理',
-    description: '配置多个 Team workspace 后，系统会逐个 Team 独立检查 quota、独立 swap_seat；该 Team 全员 quota 耗尽时才消费该 Team 的 pending invite。',
-    note: 'TEAM_WORKSPACES_JSON 支持 JSON 数组；每项至少需要 account_id，可选 workspace_name、session_token、email、max_chatgpt_active、pending_invite_email。',
+    description: '配置多个 Team workspace 后，系统会逐个 Team 独立检查 quota、独立 swap_seat；该 Team 在 swap 后 GPT seat 低于目标时才按模式补位。',
+    note: 'TEAM_WORKSPACES_JSON 支持 JSON 数组；每项至少需要 account_id，可选 workspace_name、session_token、email、max_chatgpt_active、pending_invite_email、invite_domains。',
     footer: '留空时只管理当前管理员登录态绑定的 Team。多 Team 的冷却和 quota 缓存按 account_id 隔离，不会互相占用。',
   },
 }
@@ -738,20 +771,46 @@ const teamJsonError = ref('')
 let teamRowCounter = 0
 let syncingTeamJsonFromRows = false
 const runtimeRequiredKeys = new Set(['API_KEY'])
-const sub2apiFieldHints = {
-  SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
-  SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
-  SUB2API_PASSWORD: 'ENV: SUB2API_PASSWORD · login.password',
-  SUB2API_GROUP: 'ENV: SUB2API_GROUP · group_ids',
-  SUB2API_PROXY: 'ENV: SUB2API_PROXY · 旧账号池兼容字段，swap_seat 主流程不读取',
-  SUB2API_CONCURRENCY: 'ENV: SUB2API_CONCURRENCY · account.concurrency',
-  SUB2API_PRIORITY: 'ENV: SUB2API_PRIORITY · account.priority',
-  SUB2API_RATE_MULTIPLIER: 'ENV: SUB2API_RATE_MULTIPLIER · account.rate_multiplier',
-  SUB2API_AUTO_PAUSE_ON_EXPIRED: 'ENV: SUB2API_AUTO_PAUSE_ON_EXPIRED · account.auto_pause_on_expired',
-  SUB2API_MODEL_WHITELIST: 'ENV: SUB2API_MODEL_WHITELIST · credentials.model_mapping',
-  SUB2API_OPENAI_WS_MODE: 'ENV: SUB2API_OPENAI_WS_MODE · extra.openai_oauth_responses_websockets_v2_mode / enabled',
-  SUB2API_OPENAI_PASSTHROUGH: 'ENV: SUB2API_OPENAI_PASSTHROUGH · extra.openai_passthrough',
-  SUB2API_OVERWRITE_ACCOUNT_SETTINGS: 'ENV: SUB2API_OVERWRITE_ACCOUNT_SETTINGS · AutoTeam overwrite switch',
+const runtimeFieldHints = {
+  CPA_URL: '填写 CLIProxyAPI 管理端基础地址。你也可以粘贴 /management.html 管理页地址，保存时会自动规整成基础地址，并请求 /v0/management/auth-files 验证。',
+  CPA_KEY: '填写 CPA 管理 API 密钥；如果你的 CPA 部署把管理页密码同时作为 API Key，就填同一个值。不是 OpenAI / ChatGPT 密码。',
+  SYNC_TARGET_CPA: '开启后保存 CPA_URL / CPA_KEY 时会立即连 CPA 验证；swap_seat 会以 CPA OAuth/auth-files 作为真相源。',
+  SUB2API_URL: '填写 Sub2API API 基础地址，通常是 http(s)://域名 或 http(s)://域名/api，不要填后台页面里的具体菜单地址。',
+  SUB2API_EMAIL: '填写 Sub2API 管理员登录邮箱。',
+  SUB2API_PASSWORD: '填写 Sub2API 管理员密码；保存时会登录并读取 OpenAI OAuth 账号列表验证。',
+  SUB2API_GROUP: '可填 Sub2API 分组名称或 ID；留空表示不绑定特定分组。',
+  SUB2API_PROXY: '旧账号池兼容字段，可填 Sub2API 代理 ID（数字）或代理名称；swap_seat 主流程不读取。',
+  SUB2API_CONCURRENCY: 'Sub2API 新建账号的默认并发数，正整数，例如 10。',
+  SUB2API_PRIORITY: 'Sub2API 新建账号的默认优先级，整数，例如 1。',
+  SUB2API_RATE_MULTIPLIER: 'Sub2API 新建账号的倍率，必须大于 0，例如 1 或 1.5。',
+  SUB2API_AUTO_PAUSE_ON_EXPIRED: '额度到期后是否让 Sub2API 自动暂停账号，填 true 或 false。',
+  SUB2API_MODEL_WHITELIST: '可选，逗号分隔模型名，例如 gpt-4o,gpt-4.1；留空不限制。',
+  SUB2API_OPENAI_WS_MODE: 'OpenAI WebSocket 兼容模式：off 关闭，ctx_pool 使用上下文池，passthrough 透传。',
+  SUB2API_OPENAI_PASSTHROUGH: '是否开启 OpenAI passthrough，填 true 或 false。',
+  SUB2API_OVERWRITE_ACCOUNT_SETTINGS: '同步到 Sub2API 时是否覆盖账号已有默认设置，填 true 或 false。',
+  PLAYWRIGHT_PROXY_URL: '只代理浏览器自动化流量；支持 http://、socks5://，带账号密码时用 scheme://user:pass@host:port。',
+  PLAYWRIGHT_PROXY_BYPASS: '代理绕过列表，逗号分隔，例如 localhost,127.0.0.1,*.local；本地回调通常要绕过。',
+  API_KEY: 'WebUI 和 API 的访问密钥。留空保存会自动生成；修改后当前浏览器会自动更新登录密钥。',
+  SWAP_SEAT_WHITELIST_EMAILS: '白名单成员不会查 quota、不会切 seat、不会启停 CPA OAuth；支持逗号、分号、空格或换行分隔。',
+}
+
+const runtimeFieldPlaceholders = {
+  CPA_URL: '例如：https://api.yueseng-ys.com 或 https://api.yueseng-ys.com/management.html',
+  CPA_KEY: '例如：管理页密码或管理后台生成的 API Key',
+  SYNC_TARGET_CPA: 'true 或 false',
+  SUB2API_URL: '例如：https://sub2api.example.com',
+  SUB2API_EMAIL: '例如：admin@example.com',
+  SUB2API_PASSWORD: 'Sub2API 管理员密码',
+  SUB2API_GROUP: '例如：default 或 1',
+  SUB2API_PROXY: '例如：12 或 Residential Pool',
+  SUB2API_CONCURRENCY: '例如：10',
+  SUB2API_PRIORITY: '例如：1',
+  SUB2API_RATE_MULTIPLIER: '例如：1 或 1.5',
+  SUB2API_MODEL_WHITELIST: '例如：gpt-4o,gpt-4.1',
+  PLAYWRIGHT_PROXY_URL: '例如：socks5://127.0.0.1:7890',
+  PLAYWRIGHT_PROXY_BYPASS: '例如：localhost,127.0.0.1',
+  API_KEY: '留空自动生成，或填自定义强随机密钥',
+  SWAP_SEAT_WHITELIST_EMAILS: '例如：owner@example.com; admin@example.com',
 }
 
 const mailServiceFieldMeta = {
@@ -787,7 +846,8 @@ const mailServiceFieldMeta = {
       key: 'base_url',
       label: 'Cloudflare Temp Email API 地址',
       required: true,
-      placeholder: 'https://temp-email-api.example.com',
+      placeholder: '例如：https://cfmail.jackylai.workers.dev/admin',
+      hint: '可以填 Worker 管理页地址，带不带 /admin 都可以；保存验证时会自动访问 /admin/address 检查管理员密码是否可用。',
     },
     {
       key: 'admin_password',
@@ -812,8 +872,12 @@ function fieldByKey(key) {
   return runtimeFields.value.find(field => field.key === key) || null
 }
 
-function sub2apiFieldHint(key) {
-  return sub2apiFieldHints[key] || ''
+function runtimeFieldHint(key) {
+  return runtimeFieldHints[key] || ''
+}
+
+function runtimeFieldPlaceholder(field) {
+  return runtimeFieldPlaceholders[field?.key] || field?.default || ''
 }
 
 function fieldsByKeys(keys) {
@@ -987,7 +1051,8 @@ const teamJsonPlaceholder = `[
     "account_id": "11111111-1111-1111-1111-111111111111",
     "workspace_name": "Team B",
     "max_chatgpt_active": 1,
-    "pending_invite_email": "optional@example.com"
+    "pending_invite_email": "optional@example.com",
+    "invite_domains": "*.pool-b.example.com; *.pool-c.example.com"
   }
 ]`
 
@@ -1009,6 +1074,7 @@ function createTeamRow(source = {}) {
     enabled: source.enabled === undefined ? true : Boolean(source.enabled),
     max_chatgpt_active: clampTeamActiveLimit(source.max_chatgpt_active ?? source.target_seats ?? 2),
     pending_invite_email: String(source.pending_invite_email || source.pendingInviteEmail || ''),
+    invite_domains: String(source.invite_domains || source.inviteDomains || source.invite_domain || source.inviteDomain || ''),
   }
 }
 
@@ -1019,7 +1085,8 @@ function teamHasAnyValue(team) {
     String(team?.workspace_name || '').trim() ||
     String(team?.email || '').trim() ||
     String(team?.session_token || '').trim() ||
-    String(team?.pending_invite_email || '').trim()
+    String(team?.pending_invite_email || '').trim() ||
+    String(team?.invite_domains || '').trim()
   )
 }
 
@@ -1034,6 +1101,37 @@ function parseTeamRowsFromJson(value) {
     throw new Error('TEAM_WORKSPACES_JSON 必须是数组，或包含 teams/workspaces/items 数组')
   }
   return rows.filter(item => item && typeof item === 'object').map(item => createTeamRow(item))
+}
+
+function inviteDomainOptions(value) {
+  return String(value || '')
+    .split(/[;,\n]+/)
+    .map(part => part.trim().toLowerCase().replace(/^@+/, ''))
+    .filter(Boolean)
+    .map((item) => {
+      let enableRandomSubdomain = false
+      let domain = item
+      if (domain.startsWith('*.')) {
+        enableRandomSubdomain = true
+        domain = domain.slice(2)
+      } else if (domain.startsWith('{random}.')) {
+        enableRandomSubdomain = true
+        domain = domain.slice('{random}.'.length)
+      } else {
+        const match = domain.match(/^x{3,}\.(.+)$/i)
+        if (match) {
+          enableRandomSubdomain = true
+          domain = match[1]
+        }
+      }
+      domain = domain.replace(/^\.+|\.+$/g, '')
+      if (!/^[a-z0-9.-]+\.[a-z0-9-]+$/.test(domain)) return null
+      return {
+        domain,
+        enable_random_subdomain: enableRandomSubdomain,
+      }
+    })
+    .filter(Boolean)
 }
 
 function loadTeamRowsFromJson(showMessage = false) {
@@ -1062,12 +1160,14 @@ function teamRowsPayload() {
       const email = String(team.email || '').trim().toLowerCase()
       const sessionToken = String(team.session_token || '').trim()
       const pendingEmail = String(team.pending_invite_email || '').trim().toLowerCase()
+      const inviteDomains = String(team.invite_domains || '').trim()
       if (id) item.id = id
       if (workspaceName) item.workspace_name = workspaceName
       if (team.enabled === false) item.enabled = false
       if (email) item.email = email
       if (sessionToken) item.session_token = sessionToken
       if (pendingEmail) item.pending_invite_email = pendingEmail
+      if (inviteDomains) item.invite_domains = inviteDomains
       return item
     })
 }

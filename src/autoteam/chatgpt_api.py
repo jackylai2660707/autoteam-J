@@ -1,4 +1,8 @@
-"""ChatGPT Team API 客户端 - 通过 Playwright 绕过 Cloudflare 调用内部 API"""
+"""ChatGPT Team API 客户端。
+
+登录/注册取 session 的流程可以使用浏览器；已持有 session 后的 Team API
+操作必须走 HTTP transport，不再回退到浏览器 fetch。
+"""
 
 import base64
 import json
@@ -8,8 +12,6 @@ import time
 import uuid
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 import autoteam.display  # noqa: F401
 from autoteam.admin_state import (
     get_admin_session_token,
@@ -17,8 +19,8 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
     update_admin_state,
 )
+from autoteam.browser_backend import new_browser_session
 from autoteam.chatgpt_transport import build_chatgpt_transport
-from autoteam.config import get_playwright_launch_options
 from autoteam.textio import read_text
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,7 @@ class ChatGPTTeamAPI:
         self.browser = None
         self.context = None
         self.page = None
+        self._browser_session = None
         self.access_token = None
         self.session_token = None
         self.account_id = get_chatgpt_account_id()
@@ -139,6 +142,7 @@ class ChatGPTTeamAPI:
         self.workspace_options_cache = []
         self.http_transport = None
         self.transport_name = None
+        self.allow_team_invites = False
 
     def _visible_locator_in_frames(self, selectors, timeout_ms=5000):
         selector = ", ".join(selectors)
@@ -164,13 +168,11 @@ class ChatGPTTeamAPI:
             self.stop()
 
         try:
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(**get_playwright_launch_options())
-            self.context = self.browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-            )
-            self.page = self.context.new_page()
+            self._browser_session = new_browser_session()
+            self.playwright = self._browser_session.playwright
+            self.browser = self._browser_session.browser
+            self.context = self._browser_session.context
+            self.page = self._browser_session.page
         except Exception:
             self.stop()
             raise
@@ -476,6 +478,36 @@ class ChatGPTTeamAPI:
             headers["authorization"] = f"Bearer {self.access_token}"
         return headers
 
+    @classmethod
+    def _workspace_name_from_api_node(cls, node):
+        if not isinstance(node, dict):
+            return ""
+
+        for key in ("workspace_name", "public_display_name"):
+            name = _normalize_workspace_label(node.get(key))
+            if name:
+                return name
+
+        account = node.get("account")
+        if isinstance(account, dict):
+            name = cls._workspace_name_from_api_node(account)
+            if name:
+                return name
+
+        account_like_keys = (
+            "account_id",
+            "workspace_id",
+            "workspace_type",
+            "plan_type",
+            "structure",
+        )
+        if any(node.get(key) for key in account_like_keys):
+            name = _normalize_workspace_label(node.get("name") or node.get("display_name"))
+            if name:
+                return name
+
+        return ""
+
     def _start_transport_session(self, session_token):
         self.http_transport = build_chatgpt_transport(
             session_token=session_token,
@@ -520,7 +552,7 @@ class ChatGPTTeamAPI:
         if self.browser:
             return
         if not self.session_token:
-            raise RuntimeError("缺少 session_token，无法回退到 Playwright transport")
+            raise RuntimeError("缺少 session_token，无法启动浏览器 session")
         self._start_browser_session(self.session_token)
 
     def _browser_api_fetch(self, method, path, body=None):
@@ -607,7 +639,20 @@ class ChatGPTTeamAPI:
         except Exception:
             return ""
 
-        workspace_name = (data or {}).get("workspace_name", "") if isinstance(data, dict) else ""
+        workspace_name = self._workspace_name_from_api_node(data)
+        if not workspace_name:
+            try:
+                result = self.http_transport.request(
+                    "GET",
+                    "/backend-api/accounts/optimized/check",
+                    headers=self._build_api_headers(),
+                )
+                if int(result.get("status") or 0) == 200:
+                    data = json.loads(result.get("body") or "{}")
+                    workspace_name = self._workspace_name_from_api_node(data)
+            except Exception:
+                workspace_name = ""
+
         if workspace_name:
             self.workspace_name = workspace_name
             update_admin_state(workspace_name=self.workspace_name, account_id=self.account_id)
@@ -642,16 +687,18 @@ class ChatGPTTeamAPI:
                 lower_body = body_text.lower()
 
         if self._transport_response_requires_browser_fallback(response):
-            logger.warning("[ChatGPT] curl_cffi 返回异常响应，回退 Playwright transport")
-            self._ensure_browser_session()
-            return self._browser_api_fetch(method, path, body)
+            raise RuntimeError(
+                "ChatGPT API transport 返回异常响应，API-only 模式不会启动浏览器兜底 "
+                f"(HTTP {status}): {body_text[:200]}"
+            )
 
         if status == 401 and (
             "access token is missing" in lower_body or self._transport_body_looks_like_html(body_text)
         ):
-            logger.warning("[ChatGPT] curl_cffi 鉴权异常，回退 Playwright transport")
-            self._ensure_browser_session()
-            return self._browser_api_fetch(method, path, body)
+            raise RuntimeError(
+                "ChatGPT API transport 鉴权失败，API-only 模式不会启动浏览器兜底 "
+                f"(HTTP {status}): {body_text[:200]}"
+            )
 
         return response
 
@@ -1202,7 +1249,15 @@ class ChatGPTTeamAPI:
                 """async (accessToken) => {
                 const out = {};
                 const headers = accessToken ? { authorization: `Bearer ${accessToken}` } : {};
-                for (const path of ['/backend-api/accounts', '/backend-api/me', '/api/auth/session']) {
+                const timezoneOffset = new Date().getTimezoneOffset();
+                const paths = [
+                    `/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=${timezoneOffset}`,
+                    '/backend-api/accounts/optimized/check',
+                    '/backend-api/accounts',
+                    '/backend-api/me',
+                    '/api/auth/session',
+                ];
+                for (const path of paths) {
                     try {
                         const resp = await fetch(path, { headers });
                         out[path] = { status: resp.status, data: await resp.json() };
@@ -1227,14 +1282,13 @@ class ChatGPTTeamAPI:
                     account_id = node.get("id")
                     if not account_id or not self._UUID_RE.match(str(account_id)):
                         account_id = None
-                # workspace_name 只取 workspace_name 字段，不取 name/display_name（那可能是用户名）
-                name = node.get("workspace_name") or ""
+                name = self._workspace_name_from_api_node(node)
                 if account_id:
                     candidates.append(
                         {
                             "account_id": account_id,
                             "workspace_name": name,
-                            "type": str(node.get("type", "")),
+                            "type": str(node.get("type") or node.get("workspace_type") or node.get("plan_type") or ""),
                         }
                     )
                 for value in node.values():
@@ -1247,7 +1301,7 @@ class ChatGPTTeamAPI:
 
         chosen = None
         for cand in candidates:
-            if cand["workspace_name"] and cand["workspace_name"].lower() not in ("personal",):
+            if cand["workspace_name"] and cand["workspace_name"].lower() not in ("personal", "personal account"):
                 chosen = cand
                 break
         if not chosen and candidates:
@@ -1385,7 +1439,7 @@ class ChatGPTTeamAPI:
         self.start_with_session(session_token, self.account_id, self.workspace_name)
 
     def start_with_session(self, session_token, account_id, workspace_name="", require_browser=False):
-        """用指定的 session/account 启动浏览器上下文。"""
+        """用指定的 session/account 启动 API transport。"""
         if not session_token:
             raise FileNotFoundError("缺少会话信息")
         self.stop()
@@ -1396,18 +1450,26 @@ class ChatGPTTeamAPI:
         if not self.account_id:
             raise RuntimeError("缺少 workspace/account ID")
 
-        if not require_browser and self._start_transport_session(session_token):
-            token_source = self._fetch_access_token_via_transport()
-            if token_source:
-                self._auto_detect_workspace_via_transport()
-                return
-            logger.warning("[ChatGPT] curl_cffi 未能直接获取 access token，回退 Playwright transport")
-            if self.http_transport:
-                self.http_transport.close()
-            self.http_transport = None
-            self.transport_name = None
+        if require_browser:
+            raise RuntimeError("Team API 已切换为 API-only；注册/重新捕获 session 才允许使用浏览器")
 
-        self._start_browser_session(session_token)
+        if not self._start_transport_session(session_token):
+            raise RuntimeError("ChatGPT API transport 初始化失败；请安装/启用 curl_cffi transport")
+
+        token_source = self._fetch_access_token_via_transport()
+        if token_source:
+            self._auto_detect_workspace_via_transport()
+            return
+
+        logger.warning("[ChatGPT] curl_cffi 未能直接获取 access token；API-only 模式不会回退浏览器")
+        if self.http_transport:
+            try:
+                self.http_transport.close()
+            except Exception:
+                pass
+        self.http_transport = None
+        self.transport_name = None
+        raise RuntimeError("session_token 无效或 API transport 无法获取 access token")
 
     def _auto_detect_workspace(self):
         if self.workspace_name:
@@ -1430,8 +1492,9 @@ class ChatGPTTeamAPI:
             [self.account_id, self.access_token],
         )
 
-        if result and result.get("workspace_name"):
-            self.workspace_name = result["workspace_name"]
+        workspace_name = self._workspace_name_from_api_node(result)
+        if workspace_name:
+            self.workspace_name = workspace_name
             update_admin_state(workspace_name=self.workspace_name, account_id=self.account_id)
             logger.info("[ChatGPT] 自动检测到 workspace 名称: %s", self.workspace_name)
             return self.workspace_name
@@ -1500,7 +1563,7 @@ class ChatGPTTeamAPI:
             return None
 
     def _assert_team_api_mutation_allowed(self, method, path):
-        """swap_seat-only 安全闸：允许改 seat，禁止任何 invite/kick/remove。"""
+        """Team API 安全闸：默认只允许改 seat；显式 invite-add 可创建 invite。"""
         method_u = str(method or "").upper()
         path_s = str(path or "")
 
@@ -1512,7 +1575,12 @@ class ChatGPTTeamAPI:
                 "只能 PATCH /users/{id} 修改 seat_type"
             )
         if method_u == "POST" and path_s.rstrip("/").endswith("/invites"):
-            raise RuntimeError("swap_seat-only safety guard: Team invite 创建已禁用；只消费已有 pending invite")
+            if not bool(getattr(self, "allow_team_invites", False)):
+                raise RuntimeError(
+                    "Team API safety guard: Team invite 创建默认禁用；只能通过显式 invite-add 模式创建"
+                )
+            if not re.match(r"^/backend-api/accounts/[^/]+/invites/?$", path_s.rstrip("/")):
+                raise RuntimeError("Team API safety guard: 不支持的 invite 创建路径")
         if method_u == "PATCH" and "/backend-api/accounts/" in path_s and "/invites/" in path_s:
             raise RuntimeError("swap_seat-only safety guard: invite seat 修改已禁用")
 
@@ -1521,9 +1589,30 @@ class ChatGPTTeamAPI:
         if self.http_transport:
             return self._direct_api_fetch(method, path, body)
 
-        if not self.page and self.session_token:
-            self._ensure_browser_session()
-        return self._browser_api_fetch(method, path, body)
+        raise RuntimeError("ChatGPT Team API transport 未初始化；请先用 session 启动 API-only 客户端")
+
+    def fetch_codex_usage(self):
+        """读取 ChatGPT Codex /wham/usage 原始响应（不消耗额度）。"""
+        result = self._api_fetch("GET", "/backend-api/wham/usage")
+        status = int(result.get("status") or 0)
+        body = str(result.get("body") or "")
+        if status in (401, 403):
+            raise RuntimeError(f"Codex usage 接口鉴权失败 (HTTP {status})")
+        if status != 200:
+            raise RuntimeError(f"Codex usage 接口请求失败 (HTTP {status}): {body[:200]}")
+        try:
+            data = json.loads(body)
+        except Exception as exc:
+            raise RuntimeError("Codex usage 接口返回了非 JSON 内容") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("Codex usage 接口返回结构异常")
+        return data
+
+    def check_codex_quota(self):
+        """读取并解析当前 session/account 的 Codex quota。"""
+        from autoteam.codex_auth import parse_codex_usage_payload
+
+        return parse_codex_usage_payload(self.fetch_codex_usage())
 
     def update_member_seat_type(self, user_id, seat_type):
         path = f"/backend-api/accounts/{self.account_id}/users/{user_id}"
@@ -1544,8 +1633,6 @@ class ChatGPTTeamAPI:
         return result
 
     def invite_member(self, email, seat_type="usage_based"):
-        raise RuntimeError("swap_seat-only 模式禁用创建新 Team invite；请只消费已有 pending invite")
-
         path = f"/backend-api/accounts/{self.account_id}/invites"
         body = {
             "email_addresses": [email],
@@ -1554,27 +1641,29 @@ class ChatGPTTeamAPI:
             "resend_emails": True,
         }
 
-        logger.info("[ChatGPT] 发送兜底邀请到 %s (seat_type=%s)...", email, seat_type)
-        result = self._api_fetch("POST", path, body)
+        logger.info("[ChatGPT] 创建 Team invite: %s (seat_type=%s)...", email, seat_type)
+        previous_allow = bool(getattr(self, "allow_team_invites", False))
+        self.allow_team_invites = True
+        try:
+            result = self._api_fetch("POST", path, body)
+        finally:
+            self.allow_team_invites = previous_allow
         status = int(result.get("status") or 0)
         resp_body = str(result.get("body") or "")
         try:
             data = json.loads(resp_body)
         except Exception:
             data = resp_body
-        logger.info("[ChatGPT] 兜底邀请响应: HTTP %d", status)
+        logger.info("[ChatGPT] Team invite 创建响应: HTTP %d", status)
         return status, data
 
     def _update_invite_seat_type(self, invite_id, seat_type):
         raise RuntimeError("swap_seat-only 模式已禁用修改邀请；请等待已加入成员后再切换 seat")
 
     def list_invites(self):
-        path = f"/backend-api/accounts/{self.account_id}/invites"
-        result = self._api_fetch("GET", path)
-        try:
-            return json.loads(result["body"])
-        except Exception:
-            return result["body"]
+        from autoteam.account_ops import fetch_team_invites
+
+        return fetch_team_invites(self, account_id=self.account_id)
 
     def stop(self):
         try:
@@ -1582,19 +1671,28 @@ class ChatGPTTeamAPI:
                 self.http_transport.close()
         except Exception:
             pass
-        try:
-            if self.browser:
-                self.browser.close()
-        except Exception:
-            pass
-        try:
-            if self.playwright:
-                self.playwright.stop()
-        except Exception:
-            pass
+        if self._browser_session:
+            self._browser_session.close()
+        else:
+            try:
+                if self.browser:
+                    self.browser.close()
+            except Exception:
+                pass
+            try:
+                if self.context:
+                    self.context.close()
+            except Exception:
+                pass
+            try:
+                if self.playwright:
+                    self.playwright.stop()
+            except Exception:
+                pass
         self.browser = None
         self.context = None
         self.page = None
         self.playwright = None
         self.http_transport = None
+        self._browser_session = None
         self.transport_name = None

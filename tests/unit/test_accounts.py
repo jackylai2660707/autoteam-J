@@ -105,7 +105,13 @@ def test_load_accounts_normalizes_disabled_field(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
 
     accounts_file.write_text(
-        '[{"email":"legacy@example.com","status":"standby"},{"email":"off@example.com","status":"active","disabled":1}]',
+        (
+            '[{"email":"legacy@example.com","status":"standby"},'
+            '{"email":"off@example.com","status":"active","disabled":1},'
+            '{"email":"string-false@example.com","status":"active","disabled":"false"},'
+            '{"email":"string-true@example.com","status":"active","disabled":"true"},'
+            '{"email":"string-enabled@example.com","status":"active","disabled":"enabled"}]'
+        ),
         encoding="utf-8",
     )
 
@@ -113,6 +119,12 @@ def test_load_accounts_normalizes_disabled_field(tmp_path, monkeypatch):
 
     assert loaded[0]["disabled"] is False
     assert loaded[1]["disabled"] is True
+    assert loaded[2]["disabled"] is False
+    assert loaded[3]["disabled"] is True
+    assert loaded[4]["disabled"] is False
+    assert accounts.is_account_disabled({"disabled": "false"}) is False
+    assert accounts.is_account_disabled({"disabled": "true"}) is True
+    assert accounts.is_account_disabled({"disabled": "enabled"}) is False
 
 
 def test_add_account_persists_mail_service_id_for_non_cloudmail_provider(tmp_path, monkeypatch):

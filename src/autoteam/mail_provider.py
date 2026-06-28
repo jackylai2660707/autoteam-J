@@ -458,10 +458,10 @@ def get_mail_client(
     env: dict[str, Any] | None = None,
 ):
     resolved_service = service
+    provider_name = normalize_mail_provider(provider, default="") if provider else ""
     if resolved_service is None and service_id:
         resolved_service = get_mail_service_by_id(service_id, env=env)
-    if resolved_service is None and provider:
-        provider_name = normalize_mail_provider(provider, default="")
+    if resolved_service is None and provider_name:
         services = get_mail_services(env)
         matches = [item for item in services if item.get("type") == provider_name]
         if len(matches) == 1:
@@ -470,7 +470,7 @@ def get_mail_client(
             default_service = get_default_mail_service(env, services=services)
             if default_service and default_service.get("type") == provider_name:
                 resolved_service = default_service
-    if resolved_service is None:
+    if resolved_service is None and not provider_name:
         resolved_service = get_default_mail_service(env)
 
     if resolved_service:

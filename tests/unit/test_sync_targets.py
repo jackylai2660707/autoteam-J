@@ -92,6 +92,7 @@ def test_delete_account_from_configured_targets_keeps_other_targets_when_one_fai
         lambda: [{"email": "user@example.com", "name": "codex-user@example.com-team.json"}],
     )
     monkeypatch.setattr("autoteam.cpa_sync.delete_from_cpa", lambda _name: True)
+    monkeypatch.setattr("autoteam.cpa_sync.get_managed_cpa_auth_names", lambda: {"codex-user@example.com-team.json"})
 
     def fake_sub2api_delete(_email, *, auth_names):
         raise RuntimeError(f"sub2api unavailable for {','.join(auth_names)}")
@@ -107,3 +108,23 @@ def test_delete_account_from_configured_targets_keeps_other_targets_when_one_fai
     assert result["sub2api"]["deleted"] == []
     assert result["sub2api"]["count"] == 0
     assert "sub2api unavailable" in result["sub2api"]["error"]
+
+
+def test_delete_account_from_configured_targets_skips_unmanaged_cpa_auth(monkeypatch):
+    monkeypatch.setenv("CPA_URL", "http://127.0.0.1:8317")
+    monkeypatch.setenv("CPA_KEY", "key-1")
+    monkeypatch.delenv("SYNC_TARGET_CPA", raising=False)
+    monkeypatch.setenv("SYNC_TARGET_SUB2API", "false")
+
+    deleted = []
+    monkeypatch.setattr(
+        "autoteam.cpa_sync.list_cpa_files",
+        lambda: [{"email": "user@example.com", "name": "external.json"}],
+    )
+    monkeypatch.setattr("autoteam.cpa_sync.get_managed_cpa_auth_names", lambda: set())
+    monkeypatch.setattr("autoteam.cpa_sync.delete_from_cpa", lambda name: deleted.append(name) or True)
+
+    result = sync_targets.delete_account_from_configured_targets("user@example.com")
+
+    assert result["cpa"] == {"deleted": [], "count": 0}
+    assert deleted == []

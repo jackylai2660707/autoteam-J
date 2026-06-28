@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from autoteam.config import API_KEY
+from autoteam.session_input import parse_chatgpt_session_token
 from autoteam.textio import parse_env_line, read_text, write_text
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ class SetupConfig(BaseModel):
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
     TEAM_WORKSPACES_JSON: str = ""
+    AUTO_CHECK_REPLACE_MODE: str = "pending_invite"
     API_KEY: str = ""
 
 
@@ -121,6 +123,7 @@ class AutoCheckConfigParams(BaseModel):
     interval: int | None = None
     target_seats: int | None = None
     replace_with_pending_invite: bool | None = None
+    replace_mode: str | None = None
     threshold: int | None = None
     min_low: int | None = None
     retry_add_phone: bool | None = None
@@ -149,6 +152,7 @@ _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
     "TEAM_WORKSPACES_JSON",
+    "AUTO_CHECK_REPLACE_MODE",
 }
 
 _CLOUDMAIL_REQUIRED_KEYS = ("CLOUDMAIL_BASE_URL", "CLOUDMAIL_EMAIL", "CLOUDMAIL_PASSWORD", "CLOUDMAIL_DOMAIN")
@@ -200,6 +204,7 @@ _ALL_RUNTIME_ENV_KEYS = [
     "AUTO_CHECK_INTERVAL",
     "AUTO_CHECK_TARGET_SEATS",
     "AUTO_CHECK_REPLACE_WITH_PENDING_INVITE",
+    "AUTO_CHECK_REPLACE_MODE",
     "AUTO_CHECK_THRESHOLD",
     "AUTO_CHECK_MIN_LOW",
     "AUTO_CHECK_RETRY_ADD_PHONE",
@@ -251,6 +256,22 @@ def _normalize_swap_active_limit(value: object = 2, *, default: int = 2) -> int:
     except Exception:
         count = int(default)
     return max(SWAP_ACTIVE_MIN, min(SWAP_ACTIVE_MAX, count))
+
+
+def _normalize_auto_check_replace_mode(value: object = "pending_invite") -> str:
+    mode = str(value or "pending_invite").strip().lower().replace("-", "_")
+    if mode in {"pending", "pending_invite"}:
+        return "pending_invite"
+    if mode in {"create", "create_invite", "invite_add"}:
+        return "create_invite"
+    raise ValueError("AUTO_CHECK_REPLACE_MODE 必须是 pending_invite 或 create_invite")
+
+
+def _resolve_auto_check_replace_mode(value: object = None) -> str:
+    try:
+        return _normalize_auto_check_replace_mode(value or _auto_check_config.get("replace_mode", "pending_invite"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _team_active_limit_or_default(team_context=None, default_value: object = 2) -> int:
@@ -318,15 +339,17 @@ def _require_mail_provider_configs(
     )
 
     env_values = env or _current_runtime_env()
+    target_provider = normalize_mail_provider(provider, default="") if provider else ""
     default_service = get_default_mail_service(env_values)
-    if default_service:
+    resolved_service = None
+    if default_service and (not target_provider or default_service.get("type") == target_provider):
         resolved_service = default_service
-        if provider:
-            target_provider = normalize_mail_provider(provider, default="")
-            matches = [item for item in get_mail_services(env_values) if item.get("type") == target_provider]
-            if len(matches) == 1:
-                resolved_service = matches[0]
+    elif target_provider:
+        matches = [item for item in get_mail_services(env_values) if item.get("type") == target_provider]
+        if len(matches) == 1:
+            resolved_service = matches[0]
 
+    if resolved_service:
         missing_fields = get_mail_service_missing_fields(resolved_service)
         if missing_fields:
             label = get_mail_service_display_name(resolved_service)
@@ -337,7 +360,7 @@ def _require_mail_provider_configs(
             )
         return
 
-    resolved_provider = provider or get_mail_provider_name(env_values)
+    resolved_provider = target_provider or get_mail_provider_name(env_values)
     missing = _missing_runtime_configs(get_mail_provider_required_keys(resolved_provider), env=env_values)
     if not missing:
         return
@@ -608,7 +631,12 @@ def _parse_bool_text(value: object, *, default: bool | None = None) -> bool | No
 
 
 def _validate_runtime_optional_values(values: dict[str, str]):
+    from autoteam.cpa_config import normalize_cpa_url
+
     normalized = dict(values)
+
+    if "CPA_URL" in normalized:
+        normalized["CPA_URL"] = normalize_cpa_url(normalized.get("CPA_URL", ""))
 
     def _normalize_positive_int(key: str):
         raw = str(normalized.get(key, "") or "").strip()
@@ -717,6 +745,12 @@ def _validate_runtime_optional_values(values: dict[str, str]):
     else:
         normalized["TEAM_WORKSPACES_JSON"] = ""
 
+    replace_mode = str(normalized.get("AUTO_CHECK_REPLACE_MODE", "") or "").strip()
+    if replace_mode:
+        normalized["AUTO_CHECK_REPLACE_MODE"] = _normalize_auto_check_replace_mode(replace_mode)
+    else:
+        normalized["AUTO_CHECK_REPLACE_MODE"] = "pending_invite"
+
     return normalized
 
 
@@ -735,6 +769,7 @@ def _sync_runtime_globals():
             AUTO_CHECK_ADD_PHONE_MAX_RETRIES,
             AUTO_CHECK_INTERVAL,
             AUTO_CHECK_MIN_LOW,
+            AUTO_CHECK_REPLACE_MODE,
             AUTO_CHECK_REPLACE_WITH_PENDING_INVITE,
             AUTO_CHECK_RETRY_ADD_PHONE,
             AUTO_CHECK_TARGET_SEATS,
@@ -744,6 +779,7 @@ def _sync_runtime_globals():
         auto_check_config["interval"] = AUTO_CHECK_INTERVAL
         auto_check_config["target_seats"] = AUTO_CHECK_TARGET_SEATS
         auto_check_config["replace_with_pending_invite"] = AUTO_CHECK_REPLACE_WITH_PENDING_INVITE
+        auto_check_config["replace_mode"] = AUTO_CHECK_REPLACE_MODE
         auto_check_config["threshold"] = AUTO_CHECK_THRESHOLD
         auto_check_config["min_low"] = AUTO_CHECK_MIN_LOW
         auto_check_config["retry_add_phone"] = AUTO_CHECK_RETRY_ADD_PHONE
@@ -845,6 +881,20 @@ def _verify_runtime_integrations(
                 return True
         return False
 
+    def _verification_error(label: str, verifier, *args) -> str | None:
+        try:
+            try:
+                ok = verifier(*args, raise_errors=True)
+            except TypeError as exc:
+                if "raise_errors" not in str(exc):
+                    raise
+                ok = verifier(*args)
+        except Exception as exc:
+            return f"{label}: {exc}"
+        if not ok:
+            return f"{label}: 连接失败"
+        return None
+
     cpa_values = [runtime_env.get(key, "") for key in cpa_keys[1:]]
     sub2api_values = [runtime_env.get(key, "") for key in sub2api_keys[1:]]
     sync_states = _effective_sync_target_states(runtime_env)
@@ -861,24 +911,28 @@ def _verify_runtime_integrations(
                 if missing_fields:
                     errors.append(f"{label} 缺少配置: {_format_mail_service_missing_fields(missing_fields)}")
                     continue
-                if not _verify_mail_service(service):
-                    errors.append(f"{label} 连接失败")
+                error = _verification_error(label, _verify_mail_service, service)
+                if error:
+                    errors.append(error)
         else:
             mail_services = get_mail_services(runtime_env)
             if mail_services:
                 provider = get_mail_provider_name(runtime_env)
-                if not _verify_mail_provider(provider):
-                    errors.append(f"{get_mail_provider_prompt(provider)} 连接失败")
+                label = get_mail_provider_prompt(provider)
+                error = _verification_error(label, _verify_mail_provider, provider)
+                if error:
+                    errors.append(error)
 
-    if _changed(cpa_keys) and sync_states.get("cpa") and all(cpa_values) and not _verify_cpa():
-        errors.append("CPA 连接失败")
-    if _changed(sub2api_keys) and sync_states.get("sub2api") and all(sub2api_values) and not _verify_sub2api():
-        errors.append("Sub2API 连接失败")
+    if _changed(cpa_keys) and sync_states.get("cpa") and all(cpa_values):
+        error = _verification_error("CPA", _verify_cpa)
+        if error:
+            errors.append(error)
+    if _changed(sub2api_keys) and sync_states.get("sub2api") and all(sub2api_values):
+        error = _verification_error("Sub2API", _verify_sub2api)
+        if error:
+            errors.append(error)
     if errors:
-        api_key = ""
-        if previous_env:
-            api_key = previous_env.get("API_KEY", "") or ""
-        return JSONResponse(status_code=400, content={"message": "、".join(errors), "api_key": api_key})
+        return JSONResponse(status_code=400, content={"message": "、".join(errors)})
     return None
 
 
@@ -993,7 +1047,11 @@ def get_setup_status():
 @app.post("/api/setup/save")
 def post_setup_save(config: SetupConfig):
     """保存配置到 .env 并验证连通性"""
-    return _save_runtime_config(config.model_dump(exclude_unset=True))
+    try:
+        return _save_runtime_config(config.model_dump(exclude_unset=True))
+    except Exception as exc:
+        logger.exception("[配置] 初始配置保存失败")
+        return JSONResponse(status_code=500, content={"message": f"配置保存失败: {exc}"})
 
 
 @app.get("/api/config/runtime")
@@ -1012,7 +1070,11 @@ def get_runtime_config_source():
 @app.put("/api/config/runtime")
 def put_runtime_config(config: SetupConfig):
     """登录后修改 CloudMail / CPA / Sub2API / 代理等运行时配置。"""
-    return _save_runtime_config(config.model_dump(exclude_unset=True))
+    try:
+        return _save_runtime_config(config.model_dump(exclude_unset=True))
+    except Exception as exc:
+        logger.exception("[配置] 运行时配置保存失败")
+        return JSONResponse(status_code=500, content={"message": f"配置保存失败: {exc}"})
 
 
 @app.put("/api/config/source")
@@ -1075,7 +1137,8 @@ def put_runtime_config_source(config: SourceConfig):
         _restore_runtime_source_text(previous_exists, previous_content)
         _restore_runtime_env(previous_env)
         _reload_runtime_config_modules()
-        raise
+        logger.exception("[配置] 源文件保存失败")
+        return JSONResponse(status_code=500, content={"message": "源文件保存失败，请检查 .env 内容"})
 
 
 def _safe_auto_check_config_response():
@@ -1084,6 +1147,7 @@ def _safe_auto_check_config_response():
     active_limit = _normalize_swap_active_limit(cfg.get("target_seats", 2))
     cfg["target_seats"] = active_limit
     cfg["max_chatgpt_active"] = active_limit
+    cfg["replace_mode"] = _normalize_auto_check_replace_mode(cfg.get("replace_mode", "pending_invite"))
     cfg["min_chatgpt_active"] = SWAP_ACTIVE_MIN
     cfg["max_allowed_chatgpt_active"] = SWAP_ACTIVE_MAX
     return cfg
@@ -1113,6 +1177,11 @@ def set_auto_check_config(config: AutoCheckConfigParams):
         updates["AUTO_CHECK_REPLACE_WITH_PENDING_INVITE"] = (
             "true" if data["replace_with_pending_invite"] else "false"
         )
+    if "replace_mode" in data and data["replace_mode"] is not None:
+        try:
+            updates["AUTO_CHECK_REPLACE_MODE"] = _normalize_auto_check_replace_mode(data["replace_mode"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if "threshold" in data and data["threshold"] is not None:
         updates["AUTO_CHECK_THRESHOLD"] = str(int(data["threshold"]))
@@ -1149,6 +1218,8 @@ def set_auto_check_config(config: AutoCheckConfigParams):
 
 _tasks: dict[str, dict] = {}
 _playwright_lock = threading.Lock()
+_playwright_lock_owner: str | None = None
+_playwright_lock_owner_lock_id: int | None = None
 _current_task_id: str | None = None
 _admin_login_api = None
 _admin_login_step: str | None = None
@@ -1179,6 +1250,44 @@ def ensure_current_task_not_cancelled(task_id: str | None = None):
     task = _tasks.get(task_id or _current_task_id or "")
     if task and task.get("cancel_requested"):
         raise TaskCancelledError(_get_task_cancel_message(task))
+
+
+def _current_playwright_lock_owner() -> str | None:
+    """Return the tracked owner only if it belongs to the current lock object."""
+    if _playwright_lock_owner_lock_id != id(_playwright_lock):
+        return None
+    return _playwright_lock_owner
+
+
+def _mark_playwright_lock_owner(owner: str) -> None:
+    global _playwright_lock_owner, _playwright_lock_owner_lock_id
+    _playwright_lock_owner = owner
+    _playwright_lock_owner_lock_id = id(_playwright_lock)
+
+
+def _acquire_playwright_lock(owner: str, *, blocking: bool = True) -> bool:
+    acquired = _playwright_lock.acquire(blocking=blocking)
+    if acquired:
+        _mark_playwright_lock_owner(owner)
+    return acquired
+
+
+def _release_playwright_lock(owner: str | None = None) -> bool:
+    """Release the shared browser/API lock without freeing another flow's lock."""
+    global _playwright_lock_owner, _playwright_lock_owner_lock_id
+    current_owner = _current_playwright_lock_owner()
+    if owner is not None and current_owner not in (None, owner):
+        logger.debug("[API] 跳过释放 Playwright 锁: owner=%s current=%s", owner, current_owner)
+        return False
+    if not _playwright_lock.locked():
+        if owner is None or current_owner in (None, owner):
+            _playwright_lock_owner = None
+            _playwright_lock_owner_lock_id = None
+        return False
+    _playwright_lock.release()
+    _playwright_lock_owner = None
+    _playwright_lock_owner_lock_id = None
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1333,12 +1442,16 @@ def _prune_tasks():
             del _tasks[tid]
 
 
-def _run_task(task_id: str, func, *args, **kwargs):
+def _run_task(task_id: str, func, *args, _lock_reserved: bool = False, **kwargs):
     """在后台线程中执行任务"""
     global _current_task_id
     task = _tasks[task_id]
+    owner = f"task:{task_id}"
 
-    _playwright_lock.acquire()
+    if not _lock_reserved:
+        _acquire_playwright_lock(owner, blocking=True)
+    else:
+        _mark_playwright_lock_owner(owner)
     _current_task_id = task_id
     task["started_at"] = time.time()
     task["status"] = "cancelling" if task.get("cancel_requested") else "running"
@@ -1359,16 +1472,16 @@ def _run_task(task_id: str, func, *args, **kwargs):
     finally:
         task["finished_at"] = time.time()
         _current_task_id = None
-        _playwright_lock.release()
+        _release_playwright_lock(owner)
 
 
 def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
     """创建并启动后台任务，返回任务信息"""
-    if not _playwright_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再试"))
-    _playwright_lock.release()
-
     task_id = uuid.uuid4().hex[:12]
+    owner = f"task:{task_id}"
+    if not _acquire_playwright_lock(owner, blocking=False):
+        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再试"))
+
     task = {
         "task_id": task_id,
         "command": command,
@@ -1383,11 +1496,17 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
         "cancel_requested_at": None,
         "cancel_message": "任务已终止",
     }
-    _tasks[task_id] = task
-    _prune_tasks()
+    try:
+        _tasks[task_id] = task
+        _prune_tasks()
 
-    thread = threading.Thread(target=_run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
-    thread.start()
+        task_kwargs = {**kwargs, "_lock_reserved": True}
+        thread = threading.Thread(target=_run_task, args=(task_id, func, *args), kwargs=task_kwargs, daemon=True)
+        thread.start()
+    except Exception:
+        _tasks.pop(task_id, None)
+        _release_playwright_lock(owner)
+        raise
 
     return task
 
@@ -1409,11 +1528,20 @@ class SwapSeatParams(BaseModel):
 class PendingInviteConsumeParams(BaseModel):
     email: str | None = None
     account_id: str | None = None
+    replace_mode: str | None = None
+
+
+class InviteAddParams(BaseModel):
+    account_id: str | None = None
+    max_chatgpt_active: int | None = None
+    force_create_invite: bool = False
+    invite_domains: str | None = None
 
 
 class ManageTeamsParams(BaseModel):
     max_chatgpt_active: int | None = None
     replace_with_pending_invite: bool | None = None
+    replace_mode: str | None = None
 
 
 class CleanupParams(BaseModel):
@@ -1461,6 +1589,10 @@ class TeamMemberSeatParams(BaseModel):
 class CpaAuthStatusParams(BaseModel):
     name: str
     disabled: bool
+
+
+class CpaAuthForgetParams(BaseModel):
+    name: str
 
 
 def _swap_seat_disabled(feature: str):
@@ -1622,8 +1754,7 @@ def _finish_admin_login(completed: dict):
                 pass
         _admin_login_api = None
         _admin_login_step = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
     return {"status": "completed", "admin": _admin_status(), "codex": _main_codex_status(), "info": info}
 
 
@@ -1649,8 +1780,7 @@ def _finish_main_codex_flow():
         _main_codex_flow = None
         _main_codex_step = None
         _main_codex_action = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("main-codex")
 
     message = "主号 Codex 已同步到已启用远端" if action == "sync" else "主号 Codex 已登录"
     return {
@@ -1734,10 +1864,9 @@ def post_admin_login_start(params: AdminEmailParams):
             pass
         _admin_login_api = None
         _admin_login_step = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_playwright_lock("admin-login", blocking=False):
         raise HTTPException(
             status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再进行管理员登录")
         )
@@ -1761,14 +1890,13 @@ def post_admin_login_start(params: AdminEmailParams):
         if step in ("password_required", "code_required", "workspace_required"):
             return _set_pending_admin_login(api, step)
         _pw_executor.run(api.stop)
-        _playwright_lock.release()
+        _release_playwright_lock("admin-login")
         raise HTTPException(status_code=400, detail=result.get("detail") or "无法识别管理员登录步骤")
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("[API] 管理员登录 start 失败")
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1780,7 +1908,7 @@ def post_admin_login_session(params: AdminSessionParams):
     if _admin_login_api:
         post_admin_login_cancel()
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_playwright_lock("admin-session-import", blocking=False):
         raise HTTPException(
             status_code=409,
             detail=_current_busy_detail("有任务正在执行，请等待完成后再导入管理员 session_token"),
@@ -1798,7 +1926,14 @@ def post_admin_login_session(params: AdminSessionParams):
             finally:
                 api.stop()
 
-        info = _pw_executor.run(_do_import, params.email.strip(), params.session_token.strip())
+        session_token = parse_chatgpt_session_token(params.session_token)
+        if not session_token:
+            raise HTTPException(
+                status_code=400,
+                detail="未从输入内容解析到 ChatGPT session_token。请粘贴纯 token，或包含 __Secure-next-auth.session-token 的 Cookie/JSON。",
+            )
+
+        info = _pw_executor.run(_do_import, params.email.strip(), session_token)
         _admin_login_api = None
         _admin_login_step = None
         return {"status": "completed", "admin": _admin_status(), "codex": _main_codex_status(), "info": info}
@@ -1808,8 +1943,7 @@ def post_admin_login_session(params: AdminSessionParams):
         logger.exception("[API] 导入管理员 session_token 失败")
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-session-import")
 
 
 @app.post("/api/admin/login/password")
@@ -1840,8 +1974,7 @@ def post_admin_login_password(params: AdminPasswordParams):
             pass
         _admin_login_api = None
         _admin_login_step = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1873,8 +2006,7 @@ def post_admin_login_code(params: AdminCodeParams):
             pass
         _admin_login_api = None
         _admin_login_step = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1906,8 +2038,7 @@ def post_admin_login_workspace(params: AdminWorkspaceParams):
             pass
         _admin_login_api = None
         _admin_login_step = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1922,8 +2053,7 @@ def post_admin_login_cancel():
             pass
         _admin_login_api = None
         _admin_login_step = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("admin-login")
     return {"message": "管理员登录已取消", "admin": _admin_status()}
 
 
@@ -1974,8 +2104,7 @@ def post_main_codex_cancel():
         _main_codex_flow = None
         _main_codex_step = None
         _main_codex_action = None
-        if _playwright_lock.locked():
-            _playwright_lock.release()
+        _release_playwright_lock("main-codex")
     return {"message": "主号 Codex 登录已取消", "codex": _main_codex_status()}
 
 
@@ -2117,7 +2246,7 @@ def _toggle_account_disabled(email: str, disabled: bool):
 
 
 def _toggle_accounts_disabled(emails: list[str], disabled: bool):
-    from autoteam.accounts import load_accounts, save_accounts
+    from autoteam.accounts import is_account_disabled, load_accounts, save_accounts
 
     normalized_emails = []
     seen = set()
@@ -2147,7 +2276,7 @@ def _toggle_accounts_disabled(emails: list[str], disabled: bool):
         if not acc:
             missing.append(email)
             continue
-        if bool(acc.get("disabled", False)) == bool(disabled):
+        if is_account_disabled(acc) == bool(disabled):
             unchanged.append(email)
             continue
         acc["disabled"] = bool(disabled)
@@ -2291,7 +2420,7 @@ def get_team_members(account_id: str | None = None):
     if not session_present or not resolved_account_id:
         raise HTTPException(status_code=400, detail="请先完成管理员登录")
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_playwright_lock("team-members", blocking=False):
         raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再查询"))
 
     try:
@@ -2306,6 +2435,24 @@ def get_team_members(account_id: str | None = None):
                 except TypeError:
                     members, invites = fetch_team_state(chatgpt)
                 local_emails = {a["email"].lower() for a in load_accounts()}
+                managed_emails = set(local_emails)
+                try:
+                    from autoteam.cpa_sync import (
+                        get_managed_cpa_auth_names,
+                        is_cpa_codex_oauth,
+                        is_managed_cpa_auth,
+                        list_cpa_files,
+                    )
+
+                    managed_names = get_managed_cpa_auth_names()
+                    for auth in list_cpa_files():
+                        if not is_cpa_codex_oauth(auth) or not is_managed_cpa_auth(auth, managed_names):
+                            continue
+                        email = (auth.get("email") or auth.get("account") or "").strip().lower()
+                        if email:
+                            managed_emails.add(email)
+                except Exception:
+                    logger.debug("[API] 读取受管 CPA auth 邮箱失败，Team 成员仅按本地账号池标记", exc_info=True)
 
                 result = []
                 for m in members:
@@ -2316,7 +2463,7 @@ def get_team_members(account_id: str | None = None):
                             "email": m.get("email", ""),
                             "role": m.get("role", ""),
                             "user_id": m.get("user_id") or m.get("id", ""),
-                            "is_local": email in local_emails,
+                            "is_local": email in managed_emails,
                             "type": "member",
                             "seat_type": _normalize_team_seat_type(raw_seat_type),
                             "seat_type_raw": raw_seat_type,
@@ -2331,7 +2478,7 @@ def get_team_members(account_id: str | None = None):
                             "email": email,
                             "role": inv.get("role", ""),
                             "user_id": inv.get("id", ""),
-                            "is_local": email in local_emails,
+                            "is_local": email in managed_emails,
                             "type": "invite",
                             "seat_type": _normalize_team_seat_type(raw_seat_type),
                             "seat_type_raw": raw_seat_type,
@@ -2358,7 +2505,7 @@ def get_team_members(account_id: str | None = None):
             logger.exception("[API] 获取 Team 成员失败")
             raise HTTPException(status_code=502, detail=str(exc))
     finally:
-        _playwright_lock.release()
+        _release_playwright_lock("team-members")
 
 
 @app.post("/api/team/members/remove")
@@ -2418,12 +2565,32 @@ def post_sync_main_codex():
 
 @app.get("/api/cpa/files")
 def get_cpa_files():
-    """获取 CPA 中的认证文件列表"""
+    """获取 AutoTeam 受管 CPA Codex auth 列表；未受管 auth 只统计不暴露为可操作资源。"""
     _require_cpa_configs("查看 CPA 文件")
 
-    from autoteam.cpa_sync import list_cpa_files
+    from autoteam.cpa_sync import get_managed_cpa_auth_names, is_cpa_codex_oauth, is_managed_cpa_auth, list_cpa_files
 
-    return list_cpa_files()
+    files = list_cpa_files()
+    managed_names = get_managed_cpa_auth_names()
+    codex_files = [item for item in files if is_cpa_codex_oauth(item)]
+    managed_files = [
+        {
+            **item,
+            "autoteam_managed": True,
+        }
+        for item in codex_files
+        if is_managed_cpa_auth(item, managed_names)
+    ]
+
+    return {
+        "files": managed_files,
+        "summary": {
+            "total_cpa_files": len(files),
+            "codex_total": len(codex_files),
+            "managed": len(managed_files),
+            "protected_unmanaged": max(0, len(codex_files) - len(managed_files)),
+        },
+    }
 
 
 @app.patch("/api/cpa/auth/status")
@@ -2431,12 +2598,17 @@ def patch_cpa_auth_status(params: CpaAuthStatusParams):
     """手动禁用 CPA OAuth；启用必须由 swap_seat 按 quota/seat 保留数统一决策。"""
     _require_cpa_configs("启停 CPA OAuth")
 
-    from autoteam.cpa_sync import set_cpa_auth_disabled
+    from autoteam.cpa_sync import is_managed_cpa_auth, set_cpa_auth_disabled
 
     if params.disabled is False:
         raise HTTPException(
             status_code=410,
             detail="swap_seat-only 模式禁止手动 enable CPA OAuth；请运行 swap_seat，由 CPA quota 和保留数自动选择 active OAuth",
+        )
+    if not is_managed_cpa_auth(params.name):
+        raise HTTPException(
+            status_code=403,
+            detail="禁止修改未由 AutoTeam 创建/登记的 CPA auth；请只操作本项目生成的 auth 文件",
         )
 
     result = set_cpa_auth_disabled(params.name, params.disabled)
@@ -2445,6 +2617,51 @@ def patch_cpa_auth_status(params: CpaAuthStatusParams):
         "name": params.name,
         "disabled": bool(params.disabled),
         "result": result,
+    }
+
+
+@app.post("/api/cpa/auth/forget")
+def post_cpa_auth_forget(params: CpaAuthForgetParams):
+    """删除并忘记 AutoTeam 受管 CPA auth；不会移除 Team member。"""
+    _require_cpa_configs("清理 CPA OAuth")
+
+    from autoteam.cpa_sync import (
+        cpa_auth_name_candidates,
+        delete_from_cpa,
+        is_managed_cpa_auth,
+        list_cpa_files,
+        unregister_managed_cpa_auth,
+    )
+    from autoteam.swap_seat import forget_quota_cache_entries
+
+    name = str(params.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="CPA auth name 不能为空")
+    if not is_managed_cpa_auth(name):
+        raise HTTPException(status_code=403, detail="禁止清理未由 AutoTeam 创建/登记的 CPA auth")
+
+    target = None
+    for item in list_cpa_files():
+        if name in cpa_auth_name_candidates(item):
+            target = item
+            break
+
+    email = ""
+    if isinstance(target, dict):
+        email = str(target.get("email") or target.get("account") or "").strip().lower()
+
+    deleted = delete_from_cpa(name)
+    unregistered = unregister_managed_cpa_auth(name)
+    quota = forget_quota_cache_entries(auth_id=name, email=email)
+
+    return {
+        "message": f"已清理受管 CPA auth: {name}",
+        "name": name,
+        "email": email,
+        "deleted_from_cpa": bool(deleted),
+        "unregistered": bool(unregistered),
+        "quota_cache": quota,
+        "note": "未移除 Team member；外部/未受管 auth 不会被清理",
     }
 
 
@@ -2552,7 +2769,7 @@ def post_swap_seats(params: SwapSeatParams = SwapSeatParams()):
 
 @app.post("/api/tasks/auto-detect-replace", status_code=202)
 def post_auto_detect_replace(params: PendingInviteConsumeParams = PendingInviteConsumeParams()):
-    """手动触发：先检查 quota/swap；若无可用 quota，则消费 pending invite 替换。"""
+    """手动触发：先检查 quota/swap；若 GPT seat 低于目标，则按模式补位。"""
     _require_cpa_configs("自动检测替换")
     from autoteam.mail_provider import MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL
     from autoteam.manager import cmd_auto_detect_replace
@@ -2564,7 +2781,13 @@ def post_auto_detect_replace(params: PendingInviteConsumeParams = PendingInviteC
     if params.account_id and not team_context:
         raise HTTPException(status_code=404, detail=f"未找到 Team 配置: {params.account_id}")
     active_limit = _team_active_limit_or_default(team_context, default_limit)
-    params_payload = {"max_chatgpt_active": active_limit, "email": params.email or "", "account_id": params.account_id or ""}
+    replace_mode = _resolve_auto_check_replace_mode(params.replace_mode)
+    params_payload = {
+        "max_chatgpt_active": active_limit,
+        "email": params.email or "",
+        "account_id": params.account_id or "",
+        "replace_mode": replace_mode,
+    }
     task = _start_task(
         "auto-detect-replace",
         cmd_auto_detect_replace,
@@ -2572,13 +2795,14 @@ def post_auto_detect_replace(params: PendingInviteConsumeParams = PendingInviteC
         active_limit,
         params.email,
         team_context,
+        replace_mode=replace_mode,
     )
     return task
 
 
 @app.post("/api/tasks/manage-teams", status_code=202)
 def post_manage_teams(params: ManageTeamsParams = ManageTeamsParams()):
-    """多 Team 巡检：每个 Team 独立 swap；耗尽时消费该 Team pending invite。"""
+    """多 Team 巡检：每个 Team 独立 swap；低于目标时按模式补位。"""
     _require_cpa_configs("多 Team 自动调度")
     from autoteam.mail_provider import MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL
     from autoteam.manager import cmd_manage_teams
@@ -2591,19 +2815,21 @@ def post_manage_teams(params: ManageTeamsParams = ManageTeamsParams()):
     if replace:
         _require_mail_provider_configs("多 Team 自动替换", provider=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
     active_limit = _normalize_swap_active_limit(params.max_chatgpt_active or _auto_check_config.get("target_seats", 2))
+    replace_mode = _resolve_auto_check_replace_mode(params.replace_mode)
     task = _start_task(
         "manage-teams",
         cmd_manage_teams,
-        {"max_chatgpt_active": active_limit, "replace_with_pending_invite": replace},
+        {"max_chatgpt_active": active_limit, "replace_with_pending_invite": replace, "replace_mode": replace_mode},
         active_limit,
         replace,
+        replace_mode=replace_mode,
     )
     return task
 
 
 @app.post("/api/tasks/add", status_code=202)
 def post_add(params: PendingInviteConsumeParams = PendingInviteConsumeParams()):
-    """消费 pending invite：先把非白名单旧成员切到 Codex seat，再用已有 CF 邮箱完成注册。"""
+    """消费 pending invite：只读检查目标 Team 后，用已有 CF 邮箱完成注册。"""
     from autoteam.mail_provider import MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL
     from autoteam.manager import cmd_add
     from autoteam.team_context import get_team_context
@@ -2623,6 +2849,54 @@ def post_add(params: PendingInviteConsumeParams = PendingInviteConsumeParams()):
         params.email,
         active_limit,
         team_context,
+    )
+    return task
+
+
+@app.post("/api/tasks/invite-add", status_code=202)
+def post_invite_add(params: InviteAddParams = InviteAddParams()):
+    """新增 invite：创建随机 CFMail 邮箱，发送 Team invite，注册并上传 PAT。"""
+    from autoteam.mail_provider import MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL
+    from autoteam.manager import cmd_invite_add
+    from autoteam.team_context import get_team_context
+
+    _require_cpa_configs("新增 invite 注册")
+    _require_mail_provider_configs("新增 invite 注册", provider=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
+    if not params.force_create_invite:
+        raise HTTPException(status_code=400, detail="新增 invite 会真实发送 Team invite；请传 force_create_invite=true 显式确认")
+
+    default_limit = _normalize_swap_active_limit(_auto_check_config.get("target_seats", 2))
+    requested_limit = (
+        _normalize_swap_active_limit(params.max_chatgpt_active)
+        if params.max_chatgpt_active is not None
+        else default_limit
+    )
+    team_context = get_team_context(params.account_id, default_max_chatgpt_active=requested_limit) if params.account_id else None
+    if params.account_id and not team_context:
+        raise HTTPException(status_code=404, detail=f"未找到 Team 配置: {params.account_id}")
+    active_limit = (
+        _normalize_swap_active_limit(params.max_chatgpt_active)
+        if params.max_chatgpt_active is not None
+        else _team_active_limit_or_default(team_context, default_limit)
+    )
+    invite_domains = str(params.invite_domains or "").strip()
+    task_params = {
+        "account_id": params.account_id or "",
+        "max_chatgpt_active": active_limit,
+        "force_create_invite": True,
+    }
+    if invite_domains:
+        task_params["invite_domains"] = invite_domains
+    task_kwargs = {"force_create_invite": True}
+    if invite_domains:
+        task_kwargs["invite_domains"] = invite_domains
+    task = _start_task(
+        "create-invite",
+        cmd_invite_add,
+        task_params,
+        active_limit,
+        team_context,
+        **task_kwargs,
     )
     return task
 
@@ -2706,10 +2980,13 @@ from autoteam.config import (
     AUTO_CHECK_MIN_LOW as _DEFAULT_MIN_LOW,
 )
 from autoteam.config import (
-    AUTO_CHECK_RETRY_ADD_PHONE as _DEFAULT_RETRY_ADD_PHONE,
+    AUTO_CHECK_REPLACE_MODE as _DEFAULT_REPLACE_MODE,
 )
 from autoteam.config import (
     AUTO_CHECK_REPLACE_WITH_PENDING_INVITE as _DEFAULT_REPLACE_WITH_PENDING_INVITE,
+)
+from autoteam.config import (
+    AUTO_CHECK_RETRY_ADD_PHONE as _DEFAULT_RETRY_ADD_PHONE,
 )
 from autoteam.config import (
     AUTO_CHECK_TARGET_SEATS as _DEFAULT_TARGET_SEATS,
@@ -2723,6 +3000,7 @@ _auto_check_config = {
     "interval": _DEFAULT_INTERVAL,
     "target_seats": _DEFAULT_TARGET_SEATS,
     "replace_with_pending_invite": _DEFAULT_REPLACE_WITH_PENDING_INVITE,
+    "replace_mode": _DEFAULT_REPLACE_MODE,
     "threshold": _DEFAULT_THRESHOLD,
     "min_low": _DEFAULT_MIN_LOW,
     "retry_add_phone": _DEFAULT_RETRY_ADD_PHONE,
@@ -2855,6 +3133,68 @@ def _auto_check_wait(interval_seconds, poll_seconds=0.2):
             return "stop"
 
 
+def _log_auto_pat_repair(repair_result: dict | None, *, team_label: str | None = None) -> None:
+    repair_result = repair_result or {}
+    repaired = int((repair_result.get("summary") or {}).get("repaired") or 0)
+    failed = int((repair_result.get("summary") or {}).get("failed") or 0)
+    if not repaired and not failed:
+        return
+    if team_label:
+        logger.info("[巡检] PAT 修复: team=%s repaired=%d failed=%d", team_label, repaired, failed)
+    else:
+        logger.info("[巡检] PAT 修复: repaired=%d failed=%d", repaired, failed)
+
+
+def _run_auto_single_check_task(active_limit: int, replace_with_pending_invite: bool, replace_mode: str = "pending_invite"):
+    """Run one auto-check under the task lock, including PAT repair."""
+    from autoteam.manager import cmd_auto_detect_replace, cmd_repair_pat_auths, cmd_swap_seats
+
+    try:
+        _log_auto_pat_repair(cmd_repair_pat_auths(limit=2))
+    except Exception as exc:
+        logger.warning("[巡检] PAT 修复跳过/失败: %s", exc)
+
+    if replace_with_pending_invite:
+        return cmd_auto_detect_replace(
+            max_chatgpt_active=active_limit,
+            repair_before_replace=True,
+            replace_mode=replace_mode,
+        )
+    return cmd_swap_seats(max_chatgpt_active=active_limit)
+
+
+def _run_auto_multi_team_task(
+    active_limit: int,
+    replace_with_pending_invite: bool,
+    replace_mode: str = "pending_invite",
+    teams=None,
+):
+    """Run multi-Team auto-check under the task lock, including scoped PAT repair."""
+    from autoteam.manager import cmd_manage_teams, cmd_repair_pat_auths
+    from autoteam.team_context import get_team_contexts
+
+    teams = list(teams) if teams is not None else get_team_contexts(default_max_chatgpt_active=active_limit)
+    for team in teams:
+        try:
+            _log_auto_pat_repair(
+                cmd_repair_pat_auths(limit=2, team_context=team),
+                team_label=getattr(team, "label", "") or getattr(team, "account_id", "") or "default",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[巡检] PAT 修复跳过/失败 team=%s: %s",
+                getattr(team, "label", "") or getattr(team, "account_id", "") or "default",
+                exc,
+            )
+
+    return cmd_manage_teams(
+        active_limit,
+        replace_with_pending_invite,
+        replace_mode=replace_mode,
+        pat_repair_already_run=False,
+    )
+
+
 def _auto_check_loop():
     """swap_seat-only 后台巡检：定时触发 CPA-driven seat/OAuth 收敛。"""
     while not _auto_check_stop.is_set():
@@ -2866,11 +3206,13 @@ def _auto_check_loop():
         cfg = _auto_check_config
         active_limit = _normalize_swap_active_limit(cfg.get("target_seats", 2))
         replace_with_pending_invite = bool(cfg.get("replace_with_pending_invite", False))
+        replace_mode = _normalize_auto_check_replace_mode(cfg.get("replace_mode", "pending_invite"))
         logger.info(
-            "[巡检] 等待 %d 分钟后执行下一轮 swap_seat（ChatGPT/OAuth active 保留 %d 个，耗尽自动替换=%s）",
+            "[巡检] 等待 %d 分钟后执行下一轮 swap_seat（ChatGPT/OAuth active 保留 %d 个，低于目标自动补位=%s，模式=%s）",
             cfg["interval"] // 60,
             active_limit,
             "on" if replace_with_pending_invite else "off",
+            replace_mode,
         )
 
         wait_result = _auto_check_wait(cfg["interval"])
@@ -2884,38 +3226,46 @@ def _auto_check_loop():
             if replace_with_pending_invite:
                 from autoteam.mail_provider import MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL
 
-                _require_mail_provider_configs("自动 pending invite 替换", provider=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
-            from autoteam.manager import cmd_auto_detect_replace, cmd_manage_teams, cmd_swap_seats
+                action_label = "自动创建 invite 补位" if replace_mode == "create_invite" else "自动 pending invite 补位"
+                _require_mail_provider_configs(action_label, provider=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
             from autoteam.team_context import get_team_contexts
 
             teams = get_team_contexts(default_max_chatgpt_active=active_limit)
             multi_team = bool(os.environ.get("TEAM_WORKSPACES_JSON", "").strip()) or len(teams) > 1
+
             if multi_team:
                 _start_task(
                     "manage-teams",
-                    cmd_manage_teams,
+                    _run_auto_multi_team_task,
                     {
                         "max_chatgpt_active": active_limit,
                         "trigger": "auto-check",
                         "replace_with_pending_invite": replace_with_pending_invite,
+                        "replace_mode": replace_mode,
+                        "pat_repair_already_run": True,
                     },
                     active_limit,
                     replace_with_pending_invite,
+                    replace_mode,
+                    teams,
                 )
                 continue
 
             command = "auto-detect-replace" if replace_with_pending_invite else "auto-swap-seats"
-            func = cmd_auto_detect_replace if replace_with_pending_invite else cmd_swap_seats
 
             _start_task(
                 command,
-                func,
+                _run_auto_single_check_task,
                 {
                     "max_chatgpt_active": active_limit,
                     "trigger": "auto-check",
                     "replace_with_pending_invite": replace_with_pending_invite,
+                    "replace_mode": replace_mode,
+                    "pat_repair_already_run": True,
                 },
                 active_limit,
+                replace_with_pending_invite,
+                replace_mode,
             )
         except HTTPException as exc:
             logger.warning("[巡检] 跳过自动 swap_seat: %s", exc.detail)

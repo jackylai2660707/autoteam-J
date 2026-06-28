@@ -6,3 +6,11 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    networks:
+      - default
+      - caddy_default
+
+networks:
+  default:
+  caddy_default:
+    external: true

@@ -54,6 +54,47 @@ def test_get_team_members_includes_seat_type_fields(monkeypatch):
     assert invite["seat_type_label"] == "Codex"
 
 
+def test_get_team_members_marks_managed_cpa_auth_email_as_local(monkeypatch):
+    _setup_team_member_api(monkeypatch)
+
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback(object()))
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_state",
+        lambda _chatgpt: (
+            [
+                {
+                    "email": "managed@example.com",
+                    "role": "standard-user",
+                    "id": "user-1",
+                    "seat_type": "usage_based",
+                },
+                {
+                    "email": "external@example.com",
+                    "role": "standard-user",
+                    "id": "user-2",
+                    "seat_type": "usage_based",
+                },
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
+    monkeypatch.setattr("autoteam.cpa_sync.get_managed_cpa_auth_names", lambda: {"managed.json"})
+    monkeypatch.setattr(
+        "autoteam.cpa_sync.list_cpa_files",
+        lambda: [
+            {"name": "managed.json", "provider": "codex", "email": "managed@example.com"},
+            {"name": "external.json", "provider": "codex", "email": "external@example.com"},
+        ],
+    )
+
+    result = api.get_team_members()
+
+    by_email = {item["email"]: item for item in result["members"]}
+    assert by_email["managed@example.com"]["is_local"] is True
+    assert by_email["external@example.com"]["is_local"] is False
+
+
 def test_post_team_member_remove_rejects_member_and_invite_removal(monkeypatch):
     _setup_team_member_api(monkeypatch)
 

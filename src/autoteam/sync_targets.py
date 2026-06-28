@@ -180,14 +180,17 @@ def delete_account_from_configured_targets(
     targets = get_available_sync_targets() if include_disabled else get_enabled_sync_targets()
 
     if SYNC_TARGET_CPA in targets:
-        from autoteam.cpa_sync import delete_from_cpa, list_cpa_files
+        from autoteam.cpa_sync import delete_from_cpa, get_managed_cpa_auth_names, list_cpa_files
 
         try:
             deleted = []
             auth_name_set = set(auth_names or [])
+            managed_auth_names = get_managed_cpa_auth_names()
             for item in list_cpa_files():
                 item_email = (item.get("email") or "").lower()
                 item_name = item.get("name") or ""
+                if item_name not in managed_auth_names:
+                    continue
                 if item_email == email.lower() or item_name in auth_name_set:
                     if delete_from_cpa(item_name):
                         deleted.append(item_name)

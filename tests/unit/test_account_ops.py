@@ -15,11 +15,11 @@ def test_fetch_team_state_parses_members_and_invites(monkeypatch):
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(
         {
-            "/backend-api/accounts/acc-1/users": {
+            "/backend-api/accounts/acc-1/users?offset=0&limit=25&query=": {
                 "status": 200,
                 "body": '{"items":[{"email":"member@example.com"}]}',
             },
-            "/backend-api/accounts/acc-1/invites": {
+            "/backend-api/accounts/acc-1/invites?offset=0&limit=25&query=": {
                 "status": 200,
                 "body": '{"invites":[{"email":"invite@example.com"}]}',
             },
@@ -32,15 +32,49 @@ def test_fetch_team_state_parses_members_and_invites(monkeypatch):
     assert invites == [{"email": "invite@example.com"}]
 
 
+def test_fetch_team_state_parses_har_items_and_paginates_invites(monkeypatch):
+    monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
+    chatgpt = _FakeChatGPT(
+        {
+            "/backend-api/accounts/acc-1/users?offset=0&limit=25&query=": {
+                "status": 200,
+                "body": '{"items":[{"email":"member@example.com"}],"total":1,"limit":25,"offset":0}',
+            },
+            "/backend-api/accounts/acc-1/invites?offset=0&limit=25&query=": {
+                "status": 200,
+                "body": (
+                    '{"items":[{"email_address":"first@example.com"}],'
+                    '"total":2,"limit":1,"offset":0}'
+                ),
+            },
+            "/backend-api/accounts/acc-1/invites?offset=1&limit=25&query=": {
+                "status": 200,
+                "body": (
+                    '{"items":[{"email_address":"second@example.com"}],'
+                    '"total":2,"limit":1,"offset":1}'
+                ),
+            },
+        }
+    )
+
+    members, invites = account_ops.fetch_team_state(chatgpt)
+
+    assert members == [{"email": "member@example.com"}]
+    assert invites == [
+        {"email_address": "first@example.com"},
+        {"email_address": "second@example.com"},
+    ]
+
+
 def test_fetch_team_state_raises_readable_error_when_users_response_is_html(monkeypatch):
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(
         {
-            "/backend-api/accounts/acc-1/users": {
+            "/backend-api/accounts/acc-1/users?offset=0&limit=25&query=": {
                 "status": 200,
                 "body": "<!doctype html><html><body>login</body></html>",
             },
-            "/backend-api/accounts/acc-1/invites": {
+            "/backend-api/accounts/acc-1/invites?offset=0&limit=25&query=": {
                 "status": 200,
                 "body": '{"invites":[]}',
             },
@@ -55,11 +89,11 @@ def test_fetch_team_state_raises_readable_error_when_users_auth_fails(monkeypatc
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(
         {
-            "/backend-api/accounts/acc-1/users": {
+            "/backend-api/accounts/acc-1/users?offset=0&limit=25&query=": {
                 "status": 403,
                 "body": '{"detail":"forbidden"}',
             },
-            "/backend-api/accounts/acc-1/invites": {
+            "/backend-api/accounts/acc-1/invites?offset=0&limit=25&query=": {
                 "status": 200,
                 "body": '{"invites":[]}',
             },

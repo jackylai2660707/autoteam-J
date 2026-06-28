@@ -20,11 +20,17 @@ if _env_file.exists():
 
 
 def _get_int_env(name: str, default: int) -> int:
-    return int(parse_env_value(os.environ.get(name, str(default))))
+    raw = parse_env_value(os.environ.get(name, str(default)))
+    if str(raw).strip() == "":
+        return default
+    return int(raw)
 
 
 def _get_float_env(name: str, default: float) -> float:
-    return float(parse_env_value(os.environ.get(name, str(default))))
+    raw = parse_env_value(os.environ.get(name, str(default)))
+    if str(raw).strip() == "":
+        return default
+    return float(raw)
 
 
 def _get_bool_env(name: str, default: bool) -> bool:
@@ -51,6 +57,22 @@ def _normalize_chatgpt_api_transport(value: str) -> str:
     if mode in {"auto", "playwright", "curl_cffi"}:
         return mode
     return "auto"
+
+
+def _normalize_auto_check_replace_mode(value: str) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_")
+    if mode in {"pending", "pending_invite"}:
+        return "pending_invite"
+    if mode in {"create", "create_invite", "invite_add"}:
+        return "create_invite"
+    return "pending_invite"
+
+
+def _normalize_browser_backend(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"playwright", "cloakbrowser"}:
+        return mode
+    return "cloakbrowser"
 
 
 # CloudMail 配置
@@ -108,7 +130,10 @@ AUTO_CHECK_RETRY_ADD_PHONE = _get_bool_env("AUTO_CHECK_RETRY_ADD_PHONE", True)  
 AUTO_CHECK_ADD_PHONE_MAX_RETRIES = _get_int_env("AUTO_CHECK_ADD_PHONE_MAX_RETRIES", 3)  # add_phone 最大自动重试次数
 AUTO_CHECK_REPLACE_WITH_PENDING_INVITE = _get_bool_env(
     "AUTO_CHECK_REPLACE_WITH_PENDING_INVITE", False
-)  # quota 全耗尽时自动消费 pending invite 替换
+)  # swap 后有效 GPT seat 低于目标时自动补位
+AUTO_CHECK_REPLACE_MODE = _normalize_auto_check_replace_mode(
+    _get_str_env("AUTO_CHECK_REPLACE_MODE", "pending_invite")
+)  # pending_invite=消费已有邀请；create_invite=创建随机 CFMail 并发送新邀请
 SWAP_SEAT_WHITELIST_EMAILS = _get_str_env("SWAP_SEAT_WHITELIST_EMAILS", "")  # 白名单：不查 quota、不切 seat、不启停 CPA OAuth
 
 # Playwright 代理配置
@@ -148,6 +173,22 @@ def _parse_proxy_url(proxy_url: str):
 
 def get_chatgpt_api_transport() -> str:
     return _normalize_chatgpt_api_transport(_get_str_env("CHATGPT_API_TRANSPORT", "auto"))
+
+
+def get_browser_backend() -> str:
+    return _normalize_browser_backend(_get_str_env("BROWSER_BACKEND", "cloakbrowser"))
+
+
+def get_cloakbrowser_profile_dir() -> str:
+    return _get_str_env("CLOAKBROWSER_PROFILE_DIR", "")
+
+
+def get_cloakbrowser_profile_seed() -> str:
+    return _get_str_env("CLOAKBROWSER_PROFILE_SEED", "")
+
+
+def get_cloakbrowser_humanize() -> bool:
+    return _get_bool_env("CLOAKBROWSER_HUMANIZE", True)
 
 
 def get_chatgpt_api_http_timeout() -> int:
