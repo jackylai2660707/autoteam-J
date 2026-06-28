@@ -433,6 +433,17 @@ def quota_remaining_pair(status: str, info: dict | None) -> tuple[int, int]:
     return remaining["primary"], remaining["weekly"]
 
 
+def quota_remaining_log_text(status: str, info: dict | None) -> str:
+    """Human-readable quota windows for logs, using N/A for windows that do not apply."""
+    remaining = quota_remaining_by_window(status, info)
+    applicable = quota_applicable_windows(status, info)
+    labels = []
+    for window, label in (("primary", "5h"), ("weekly", "weekly"), ("monthly", "monthly")):
+        value = f"{remaining[window]}%" if window in applicable else "N/A"
+        labels.append(f"{label}={value}")
+    return " ".join(labels)
+
+
 def quota_available(status: str, info: dict | None) -> bool:
     """任一适用窗口耗尽都不可用；不适用窗口（如 monthly-only 的 5h）不参与判断。"""
     if status != "ok":
@@ -1198,13 +1209,10 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
             if cached:
                 quota_results[auth_id] = cached
                 status, info = cached
-                remaining = quota_remaining_by_window(status, info)
                 logger.info(
-                    "[swap_seat] quota %s: cached recent ok 5h=%d%% weekly=%d%% monthly=%d%%，避免频繁检查 CPA quota",
+                    "[swap_seat] quota %s: cached recent ok %s，避免频繁检查 CPA quota",
                     email or auth_id,
-                    remaining["primary"],
-                    remaining["weekly"],
-                    remaining["monthly"],
+                    quota_remaining_log_text(status, info),
                 )
                 continue
             status, info = check_cpa_codex_quota(auth, account_id=account_id)
@@ -1212,14 +1220,11 @@ def cmd_swap_seats(max_chatgpt_active: int = 2, *, chatgpt_api=None, team_contex
             record_quota_result(auth, status, info, account_id=account_id)
             if status == "auth_error":
                 mark_auth_error_for_pat_repair(auth, info)
-            remaining = quota_remaining_by_window(status, info)
             logger.info(
-                "[swap_seat] quota %s: status=%s 5h=%d%% weekly=%d%% monthly=%d%%",
+                "[swap_seat] quota %s: status=%s %s",
                 email or auth_id,
                 status,
-                remaining["primary"],
-                remaining["weekly"],
-                remaining["monthly"],
+                quota_remaining_log_text(status, info),
             )
 
         plan = build_swap_plan(
