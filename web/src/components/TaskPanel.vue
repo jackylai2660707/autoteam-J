@@ -125,7 +125,7 @@
         v-if="pendingAction?.key === 'bulk-invite'"
         class="mt-3 rounded-lg border border-orange-500/20 bg-orange-500/10 px-3 py-3 text-xs text-orange-100"
       >
-        <label class="mb-2 block text-sm font-medium text-orange-50">批量 invite 邮箱列表</label>
+        <label class="mb-2 block text-sm font-medium text-orange-50">批量 invite 邮箱列表（默认 Codex seat）</label>
         <textarea
           v-model.trim="bulkInviteEmailsInput"
           rows="6"
@@ -137,7 +137,7 @@
           {{ bulkInviteError }}
         </div>
         <div v-else class="mt-2 rounded-lg border border-gray-700/70 bg-gray-900/70 px-3 py-2 text-gray-200">
-          将发送 {{ bulkInviteEmails.length }} 个 invite；后端按 20 个/批、并发 {{ paramValue || 3 }} 批执行。这里只发送邀请，不注册账号、不上传 PAT。
+          将发送 {{ bulkInviteEmails.length }} 个 Codex seat invite；后端按 5 个/批、并发 {{ paramValue || 3 }} 批执行。这里只发送邀请，不注册账号、不上传 PAT。
         </div>
         <label class="mt-3 flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100">
           <input
@@ -148,7 +148,7 @@
           <span>
             <span class="font-medium text-red-50">确认批量发送真实 Team invite</span>
             <span class="block text-red-200/80">
-              会向列表中的邮箱发送邀请邮件；不会自动消费这些 invite。
+              会向列表中的邮箱发送 Codex seat 邀请邮件；不会自动消费这些 invite。
             </span>
           </span>
         </label>

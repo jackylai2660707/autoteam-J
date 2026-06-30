@@ -2973,7 +2973,7 @@ def post_bulk_invite(params: BulkInviteParams):
         raise HTTPException(status_code=400, detail="请填写至少 1 个邮箱")
 
     concurrency = max(1, min(8, int(params.concurrency or 3)))
-    batch_size = max(1, min(50, int(params.batch_size or 20)))
+    batch_size = max(1, min(50, int(params.batch_size or 5)))
     task = _start_task(
         "bulk-invite",
         cmd_bulk_invite,

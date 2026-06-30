@@ -457,11 +457,51 @@ def test_cmd_bulk_invite_sends_deduped_batches(monkeypatch):
     )
 
     assert result["mode"] == "bulk_invite"
-    assert result["summary"] == {"requested": 2, "sent": 2, "failed": 0, "invalid": 0, "batches": 2}
+    assert result["summary"] == {
+        "requested": 2,
+        "sent": 2,
+        "failed": 0,
+        "invalid": 0,
+        "batches": 2,
+        "verified_after_error": 0,
+    }
     assert fake_chatgpt.batch_calls == [
         (["one@example.com"], "usage_based", True),
         (["two@example.com"], "usage_based", True),
     ]
+
+
+def test_cmd_bulk_invite_reconciles_timeout_when_pending_exists(monkeypatch):
+    class _InviteChatGPT(_FakeChatGPT):
+        def __init__(self):
+            super().__init__()
+            self.batch_calls = []
+
+        def invite_members(self, emails, seat_type="usage_based", *, resend_emails=True):
+            self.batch_calls.append((list(emails), seat_type, resend_emails))
+            raise RuntimeError("timeout")
+
+        def list_invites(self):
+            return [
+                {"email_address": "one@example.com", "status": 2, "seat_type": "usage_based"},
+                {"email_address": "two@example.com", "status": 2, "seat_type": "usage_based"},
+            ]
+
+    fake_chatgpt = _InviteChatGPT()
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: fake_chatgpt)
+
+    result = manager.cmd_bulk_invite("one@example.com two@example.com", concurrency=1, batch_size=2)
+
+    assert result["summary"] == {
+        "requested": 2,
+        "sent": 2,
+        "failed": 0,
+        "invalid": 0,
+        "batches": 1,
+        "verified_after_error": 2,
+    }
+    assert result["verified_after_error"] == ["one@example.com", "two@example.com"]
+    assert result["failed"] == []
 
 
 def test_activate_registered_account_promotes_new_member_without_disabling_old_oauth(monkeypatch):

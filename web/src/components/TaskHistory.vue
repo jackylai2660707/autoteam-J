@@ -168,7 +168,8 @@ function formatResult(result) {
   }
   if (result.mode === 'bulk_invite') {
     const summary = result.summary || {}
-    return `已发送 ${summary.sent || 0}/${summary.requested || 0} · 失败 ${summary.failed || 0} · 无效 ${summary.invalid || 0}`
+    const verified = summary.verified_after_error ? ` · 复查确认 ${summary.verified_after_error}` : ''
+    return `已发送 ${summary.sent || 0}/${summary.requested || 0} · 失败 ${summary.failed || 0} · 无效 ${summary.invalid || 0}${verified}`
   }
   if (result.mode === 'clear_pending_invites') {
     const summary = result.summary || {}

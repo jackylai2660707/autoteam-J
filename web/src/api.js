@@ -80,7 +80,7 @@ export const api = {
     account_id: accountId,
     emails,
     concurrency: Math.max(1, Math.min(8, Number(concurrency) || 3)),
-    batch_size: 20,
+    batch_size: 5,
     seat_type: 'usage_based',
     resend_emails: true,
     confirm: !!confirm,

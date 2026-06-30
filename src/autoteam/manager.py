@@ -3397,7 +3397,7 @@ def cmd_bulk_invite(
     team_context=None,
     seat_type: str = "usage_based",
     concurrency: int = 3,
-    batch_size: int = 20,
+    batch_size: int = 5,
     resend_emails: bool = True,
 ) -> dict:
     """并发批量发送 Team invite；只发送邀请，不注册账号/不生成 PAT。"""
@@ -3411,7 +3411,7 @@ def cmd_bulk_invite(
         raise RuntimeError("seat_type 只允许 usage_based 或 default")
 
     concurrency = _normalize_invite_concurrency(concurrency, default=3, maximum=8)
-    batch_size = _normalize_invite_batch_size(batch_size, default=20, maximum=50)
+    batch_size = _normalize_invite_batch_size(batch_size, default=5, maximum=50)
     batches = list(_chunked(email_list, batch_size))
 
     def send_batch(batch: list[str], batch_index: int):
@@ -3455,7 +3455,37 @@ def cmd_bulk_invite(
                 logger.warning("[批量 invite] batch %s 失败: %s", batch_index, exc)
                 failed.extend({"email": email, "error": str(exc)} for email in batch)
 
+    verified_after_error = []
+    if failed:
+        try:
+            def _list_invites(chatgpt_api):
+                return chatgpt_api.list_invites()
+
+            remote_invites = _run_team_invite_worker(team_context, _list_invites)
+            remote_pending = {
+                _invite_email(invite)
+                for invite in remote_invites or []
+                if _is_pending_invite(invite)
+            }
+            remaining_failed = []
+            for item in failed:
+                email = _normalized_email(item.get("email"))
+                if email and email in remote_pending:
+                    sent.append(email)
+                    verified_after_error.append(email)
+                else:
+                    remaining_failed.append(item)
+            if verified_after_error:
+                logger.info(
+                    "[批量 invite] 复查确认 %d 个超时/失败邮箱已创建 pending invite",
+                    len(verified_after_error),
+                )
+            failed = remaining_failed
+        except Exception as exc:
+            logger.warning("[批量 invite] 失败后复查 pending invite 失败: %s", exc)
+
     sent = sorted(dict.fromkeys(sent))
+    verified_after_error = sorted(dict.fromkeys(verified_after_error))
     failed.sort(key=lambda item: item.get("email") or "")
     return {
         "mode": "bulk_invite",
@@ -3469,12 +3499,14 @@ def cmd_bulk_invite(
         "batches": sorted(batch_results, key=lambda item: item.get("batch") or 0),
         "sent": sent,
         "failed": failed,
+        "verified_after_error": verified_after_error,
         "summary": {
             "requested": len(email_list),
             "sent": len(sent),
             "failed": len(failed),
             "invalid": len(invalid),
             "batches": len(batches),
+            "verified_after_error": len(verified_after_error),
         },
     }
 
