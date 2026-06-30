@@ -417,10 +417,10 @@ def test_cmd_clear_pending_invites_deletes_by_email(monkeypatch):
 
         def list_invites(self):
             return [
-                {"email_address": "one@example.com", "id": "inv-1", "status": "pending"},
+                {"email_address": "one@example.com", "id": "inv-1", "status": 2},
                 {"email_address": "two@example.com", "id": "inv-2", "status": "pending"},
                 {"email_address": "joined@example.com", "id": "inv-accepted", "status": "accepted"},
-                {"email_address": "one@example.com", "id": "inv-dup", "status": "pending"},
+                {"email_address": "one@example.com", "id": "inv-dup", "status": 2},
             ]
 
         def cancel_invite(self, email):

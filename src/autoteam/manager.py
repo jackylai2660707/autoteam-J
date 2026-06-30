@@ -210,8 +210,12 @@ def _invite_email(invite: dict | None) -> str:
 
 def _is_pending_invite(invite: dict | None) -> bool:
     invite = invite or {}
-    status = str(invite.get("status") or "").strip().lower()
-    return not status or status == "pending"
+    raw_status = invite.get("status")
+    if raw_status is None or raw_status == "":
+        return True
+    status = str(raw_status).strip().lower()
+    # ChatGPT currently returns numeric status=2 for pending invites.
+    return status in {"2", "pending", "invited", "sent"}
 
 
 def _normalize_invite_concurrency(value, *, default=3, maximum=8) -> int:
@@ -3303,6 +3307,7 @@ def cmd_clear_pending_invites(*, team_context=None, concurrency: int = 4) -> dic
             emails.append(email)
 
     if not emails:
+        logger.info("[pending invite 清理] Team=%s 扫描 %d 条，未发现 pending invite", _team_label(team_context), len(invites or []))
         return {
             "mode": "clear_pending_invites",
             "team": _team_label(team_context),
@@ -3313,32 +3318,67 @@ def cmd_clear_pending_invites(*, team_context=None, concurrency: int = 4) -> dic
             "summary": {"scanned": len(invites or []), "deleted": 0, "failed": 0},
         }
 
-    def delete_one(email: str):
+    logger.info(
+        "[pending invite 清理] Team=%s 扫描 %d 条，准备清理 %d 条，并发=%d",
+        _team_label(team_context),
+        len(invites or []),
+        len(emails),
+        concurrency,
+    )
+
+    worker_count = min(concurrency, len(emails))
+    email_batches = [[] for _ in range(worker_count)]
+    for index, email in enumerate(emails):
+        email_batches[index % worker_count].append(email)
+
+    def delete_batch(batch: list[str], batch_index: int):
         def _delete(chatgpt_api):
-            status, data = chatgpt_api.cancel_invite(email)
-            if status not in (200, 201, 202, 204):
-                raise RuntimeError(f"HTTP {status} {str(data)[:200]}")
-            if isinstance(data, dict) and data.get("success") is False:
-                raise RuntimeError(str(data)[:200])
-            return {"email": email, "status": status}
+            batch_deleted = []
+            batch_failed = []
+            for email in batch:
+                _abort_if_cancel_requested()
+                try:
+                    status, data = chatgpt_api.cancel_invite(email)
+                    if status not in (200, 201, 202, 204):
+                        raise RuntimeError(f"HTTP {status} {str(data)[:200]}")
+                    if isinstance(data, dict) and data.get("success") is False:
+                        raise RuntimeError(str(data)[:200])
+                    batch_deleted.append({"email": email, "status": status})
+                except Exception as exc:
+                    logger.warning("[pending invite 清理] %s 失败: %s", email, exc)
+                    batch_failed.append({"email": email, "error": str(exc)})
+            return {"batch": batch_index, "deleted": batch_deleted, "failed": batch_failed}
 
         return _run_team_invite_worker(team_context, _delete)
 
     deleted = []
     failed = []
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(delete_one, email): email for email in emails}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(delete_batch, batch, index + 1): batch
+            for index, batch in enumerate(email_batches)
+            if batch
+        }
         for future in as_completed(futures):
             _abort_if_cancel_requested()
-            email = futures[future]
+            batch = futures[future]
             try:
-                deleted.append(future.result())
+                result = future.result()
+                deleted.extend(result.get("deleted") or [])
+                failed.extend(result.get("failed") or [])
             except Exception as exc:
-                logger.warning("[pending invite 清理] %s 失败: %s", email, exc)
-                failed.append({"email": email, "error": str(exc)})
+                logger.warning("[pending invite 清理] batch 失败: %s", exc)
+                failed.extend({"email": email, "error": str(exc)} for email in batch)
 
     deleted.sort(key=lambda item: item.get("email") or "")
     failed.sort(key=lambda item: item.get("email") or "")
+    logger.info(
+        "[pending invite 清理] Team=%s 完成：扫描=%d 清理=%d 失败=%d",
+        _team_label(team_context),
+        len(invites or []),
+        len(deleted),
+        len(failed),
+    )
     return {
         "mode": "clear_pending_invites",
         "team": _team_label(team_context),
