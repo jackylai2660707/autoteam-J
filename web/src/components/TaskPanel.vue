@@ -270,7 +270,7 @@ const visibleActions = computed(() => {
   return actions.filter(action => action.group === props.mode)
 })
 const panelTitle = computed(() => {
-  if (props.mode === 'pool') return 'Seat 调度'
+  if (props.mode === 'pool') return 'Team 操作'
   return '操作'
 })
 const paramMax = computed(() => pendingAction.value?.paramName === 'max_chatgpt_active' ? 5 : 8)

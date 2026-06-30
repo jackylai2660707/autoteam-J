@@ -10,11 +10,11 @@
     <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <h2 class="text-2xl font-bold text-white">运行总览</h2>
-        <p class="mt-1 text-sm text-gray-400">状态来自只读接口；执行 swap 或 pending invite 替换请到「Seat 调度」。</p>
+        <p class="mt-1 text-sm text-gray-400">状态来自只读接口；批量 invite、清空 pending invite 和 swap 请到「Team 操作」。</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <button @click="emit('navigate', 'pool')" class="btn-primary px-4 py-2 text-sm">
-          去 Seat 调度
+          去 Team 操作
         </button>
         <button @click="emit('navigate', 'team')" class="btn-secondary px-4 py-2 text-sm">
           Team 成员

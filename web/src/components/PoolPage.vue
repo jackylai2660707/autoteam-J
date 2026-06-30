@@ -3,11 +3,11 @@
     <div class="mb-6">
       <div class="mb-2 inline-flex items-center gap-2 rounded-full border border-blue-400/20 bg-blue-500/10 px-3 py-1 text-xs text-blue-200">
         <span class="inline-block h-2 w-2 rounded-full bg-cyan-300 shadow-[0_0_12px_rgba(103,232,249,0.9)]"></span>
-        swap_seat control plane
+        team operations control plane
       </div>
-      <h2 class="text-2xl font-bold text-white">Seat 调度</h2>
+      <h2 class="text-2xl font-bold text-white">Team 操作 / Seat 调度</h2>
       <p class="mt-2 max-w-4xl text-sm leading-6 text-gray-400">
-        只管理 AutoTeam 生成/登记的 auth 和受管 Team member；外部 CPA auth 只保护不使用、不查 quota、不启停、不删除。配置多个 Team 后会逐个 Team 独立调度，全程不 kick/remove/cancel。
+        批量发送 invite、清空 pending invite、swap_seat 和多 Team 自动调度都在这里。只管理 AutoTeam 生成/登记的 auth 和受管 Team member；外部 CPA auth 只保护不使用、不查 quota、不启停、不删除。
       </p>
     </div>
 

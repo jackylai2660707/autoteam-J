@@ -88,7 +88,7 @@ defineEmits(['navigate', 'refresh', 'logout'])
 
 const items = [
   { key: 'dashboard', icon: '📊', label: '总览', mobileLabel: '总览', hint: 'Team / quota / CPA 状态' },
-  { key: 'pool', icon: '🔁', label: 'Seat 调度', mobileLabel: '调度', hint: 'CPA quota 驱动 swap_seat' },
+  { key: 'pool', icon: '🔁', label: 'Team 操作', mobileLabel: 'Team', hint: 'swap / 批量 invite / 清 pending' },
   { key: 'team', icon: '👥', label: 'Team 成员', mobileLabel: '成员', hint: '只读查看成员 seat' },
   { key: 'config', icon: '🧩', label: '配置面板', mobileLabel: '配置', hint: 'CPA / CFMail / 自动巡检' },
   { key: 'tasks', icon: '📜', label: '任务历史', mobileLabel: '任务', hint: '追踪 swap 与 pending invite 注册' },
