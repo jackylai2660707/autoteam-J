@@ -30,6 +30,24 @@ def test_verification_email_marker_skips_invites_and_old_codes():
     assert invite._is_new_verification_email({"emailId": "14"}, baseline) is True
 
 
+def test_verification_email_marker_uses_created_at_without_numeric_id():
+    class _Mail:
+        def search_emails_by_recipient(self, _email, size=20):
+            return [
+                {
+                    "created_at": "2026-06-30 16:22:38",
+                    "sendEmail": "noreply@openai.com",
+                    "subject": "Your temporary ChatGPT verification code",
+                }
+            ]
+
+    baseline = invite._latest_verification_email_marker(_Mail(), "user@example.com")
+
+    assert baseline > 0
+    assert invite._is_new_verification_email({"created_at": "2026-06-30 16:22:38"}, baseline) is False
+    assert invite._is_new_verification_email({"created_at": "2026-06-30 16:22:39"}, baseline) is True
+
+
 class _NullElement:
     def __init__(self):
         self.clicked = False

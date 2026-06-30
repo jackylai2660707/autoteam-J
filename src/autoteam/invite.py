@@ -21,6 +21,8 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from autoteam.signup_profile import SignupProfile, generate_signup_profile
 
@@ -29,6 +31,15 @@ logger = logging.getLogger(__name__)
 MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 SCREENSHOT_DIR = "screenshots"
 REGISTRATION_ERROR_ATTR = "_autoteam_registration_error"
+
+
+def _abort_if_cancel_requested():
+    try:
+        from autoteam.api import ensure_current_task_not_cancelled
+    except ImportError:
+        return
+
+    ensure_current_task_not_cancelled()
 
 
 def _set_registration_error(page, error_type: str, detail: str | None = None):
@@ -51,10 +62,40 @@ def get_registration_error(page) -> dict | None:
 def _email_numeric_marker(email_data) -> int:
     for key in ("emailId", "id"):
         try:
-            return int(email_data.get(key) or 0)
+            marker = int(email_data.get(key) or 0)
+            if marker:
+                return marker
+        except Exception:
+            continue
+    for key in ("created_at", "createdAt", "received_at", "receivedAt", "timestamp", "time", "date"):
+        marker = _email_time_marker(email_data.get(key))
+        if marker:
+            return marker
+    return 0
+
+
+def _email_time_marker(value) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return int(numeric if numeric > 10_000_000_000 else numeric * 1000)
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    for parser in (_parse_iso_datetime, parsedate_to_datetime):
+        try:
+            dt = parser(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
         except Exception:
             continue
     return 0
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _is_chatgpt_verification_email(email_data) -> bool:
@@ -595,6 +636,7 @@ def register_with_invite(
         # 搜索来自 OpenAI 的验证码邮件（不是邀请邮件）
         start = time.time()
         while time.time() - start < MAIL_TIMEOUT:
+            _abort_if_cancel_requested()
             if _abort_if_session_expired(page, "reg_05_session_expired.png"):
                 return False, password
             emails = mail_client.search_emails_by_recipient(email, size=10)
@@ -613,6 +655,8 @@ def register_with_invite(
             print(f"\r[CloudMail] 等待验证码... ({elapsed}s)", end="", flush=True)
             time.sleep(3)
     except Exception as e:
+        if e.__class__.__name__ == "TaskCancelledError":
+            raise
         logger.error("[注册] 等待验证码异常: %s", e)
 
     if not verification_code:

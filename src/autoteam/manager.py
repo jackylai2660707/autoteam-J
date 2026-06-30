@@ -140,6 +140,7 @@ logger = logging.getLogger(__name__)
 
 MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 REUSE_RESET_GRACE_SECONDS = int(os.environ.get("REUSE_RESET_GRACE_SECONDS", "300"))
+PENDING_INVITE_MAX_REGISTRATION_ATTEMPTS_DEFAULT = 3
 
 # 兼容旧调用名：现在返回“默认邮箱服务”的客户端，不再只指向 CloudMail。
 CloudMailClient = get_mail_client
@@ -164,6 +165,37 @@ def _abort_if_cancel_requested():
         return
 
     ensure_current_task_not_cancelled()
+
+
+def _int_env(name: str, default: int, *, minimum: int = 1, maximum: int = 50) -> int:
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _pending_invite_max_registration_attempts() -> int:
+    return _int_env(
+        "PENDING_INVITE_MAX_REGISTRATION_ATTEMPTS",
+        PENDING_INVITE_MAX_REGISTRATION_ATTEMPTS_DEFAULT,
+        minimum=1,
+        maximum=20,
+    )
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 AUTH_REPAIR_HARD_FAILURE_TYPES = {
@@ -377,6 +409,7 @@ class _ForwardedRecipientMailClient:
             timeout = timeout or MAIL_TIMEOUT
             start = time.time()
             while time.time() - start < timeout:
+                _abort_if_cancel_requested()
                 emails = self.search_emails_by_recipient(requested, size=20)
                 for email_item in emails:
                     sender = str(email_item.get("sendEmail") or email_item.get("source") or "")
@@ -2873,6 +2906,37 @@ def _autoteam_pending_invite_retry_candidates(chatgpt_api, mail_client, *, accou
     return retry
 
 
+def _prioritize_pending_invite_candidates(candidates: list[dict]) -> list[dict]:
+    accounts_by_email = {_normalized_email(acc.get("email")): acc for acc in load_accounts()}
+
+    def sort_key(indexed_item):
+        index, item = indexed_item
+        email = _normalized_email(item.get("email"))
+        acc = accounts_by_email.get(email) or {}
+        last_attempt_at = _safe_float(acc.get("pending_invite_last_attempt_at"))
+        attempts = _safe_int(acc.get("pending_invite_attempts"))
+        return (last_attempt_at, attempts, index)
+
+    return [item for _index, item in sorted(enumerate(candidates), key=sort_key)]
+
+
+def _mark_pending_invite_attempt_started(email: str) -> None:
+    acc = find_account(load_accounts(), email) or {}
+    update_account(
+        email,
+        pending_invite_attempts=_safe_int(acc.get("pending_invite_attempts")) + 1,
+        pending_invite_last_attempt_at=time.time(),
+        pending_invite_last_attempt_error=None,
+    )
+
+
+def _mark_pending_invite_attempt_finished(email: str, error: str | None = None) -> None:
+    updates = {"pending_invite_last_attempt_error": error}
+    if error is None:
+        updates["pending_invite_consumed_at"] = time.time()
+    update_account(email, **updates)
+
+
 def _extract_pending_invite_link(mail_client, email, *, timeout=MAIL_TIMEOUT):
     account_id = _mail_account_id_for_email(mail_client, email)
     try:
@@ -3217,6 +3281,16 @@ def create_new_account(
     candidates = _pending_invite_candidates(chatgpt_api, mail_client, account_id=team_account_id)
     if pending_invite_email:
         candidates = [item for item in candidates if _normalized_email(item.get("email")) == pending_invite_email]
+    else:
+        candidates = _prioritize_pending_invite_candidates(candidates)
+        max_attempts = _pending_invite_max_registration_attempts()
+        if len(candidates) > max_attempts:
+            logger.info(
+                "[注册新号] 本轮最多尝试 %d/%d 个 pending invite；失败候选会排到后续巡检再试",
+                max_attempts,
+                len(candidates),
+            )
+            candidates = candidates[:max_attempts]
     if not candidates:
         if pending_invite_email:
             logger.warning("[注册新号] 未找到指定 pending invite: %s", pending_invite_email)
@@ -3242,21 +3316,30 @@ def create_new_account(
             candidate.get("invite_id"),
             mail_account_id,
         )
+        _mark_pending_invite_attempt_started(email)
 
         try:
             invite_link = _extract_pending_invite_link(mail_client, email)
         except TimeoutError:
-            update_account(email, status=STATUS_PENDING, auth_last_error="invite_mail_missing")
+            _mark_pending_invite_attempt_finished(email, "invite_mail_missing")
+            update_account(
+                email,
+                status=STATUS_PENDING,
+                auth_last_error="invite_mail_missing",
+            )
             logger.warning("[注册新号] pending invite 邮件缺失/超时: %s", email)
             last_error = f"{email}: invite_mail_missing"
             continue
         except Exception as exc:
-            update_account(email, status=STATUS_PENDING, auth_last_error=f"invite_mail_error: {exc}")
+            error = f"invite_mail_error: {exc}"
+            _mark_pending_invite_attempt_finished(email, error[:300])
+            update_account(email, status=STATUS_PENDING, auth_last_error=error)
             logger.warning("[注册新号] 提取 pending invite 邮件失败 %s: %s", email, exc)
             last_error = f"{email}: {exc}"
             continue
 
         if not invite_link:
+            _mark_pending_invite_attempt_finished(email, "invite_link_missing")
             update_account(email, status=STATUS_PENDING, auth_last_error="invite_link_missing")
             last_error = f"{email}: invite_link_missing"
             continue
@@ -3266,7 +3349,9 @@ def create_new_account(
             chatgpt_api.stop()
         result = _complete_registration(email, password, invite_link, mail_client, team_context=team_context)
         if result:
+            _mark_pending_invite_attempt_finished(email)
             return result
+        _mark_pending_invite_attempt_finished(email, "registration_failed")
         last_error = f"{email}: registration_failed"
 
     if last_error:

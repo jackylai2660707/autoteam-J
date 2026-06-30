@@ -298,6 +298,60 @@ def test_create_new_account_consumes_existing_pending_invite_without_pre_sweepin
     assert fake_chatgpt.stopped is True
 
 
+def test_create_new_account_limits_and_rotates_failed_pending_invites(monkeypatch):
+    fake_chatgpt = _FakeChatGPT()
+    fake_mail = _FakeCfMail()
+    team_members = [{"email": "old@example.com", "id": "u-old", "seat_type": "usage_based"}]
+    invites = [
+        {"id": "inv-recent", "email_address": "recent@example.com", "seat_type": "usage_based"},
+        {"id": "inv-first", "email_address": "first@example.com", "seat_type": "usage_based"},
+        {"id": "inv-second", "email_address": "second@example.com", "seat_type": "usage_based"},
+    ]
+    attempted = []
+    updates = []
+
+    monkeypatch.setenv("PENDING_INVITE_MAX_REGISTRATION_ATTEMPTS", "2")
+    monkeypatch.setattr(manager.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(manager, "_fetch_team_members_for_account", lambda _chatgpt, account_id=None: team_members)
+    monkeypatch.setattr(manager, "fetch_team_state", lambda _chatgpt: (team_members, invites))
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {
+                "email": "recent@example.com",
+                "status": "pending",
+                "pending_invite_attempts": 1,
+                "pending_invite_last_attempt_at": 999.0,
+            }
+        ],
+    )
+    monkeypatch.setattr(manager, "_extract_pending_invite_link", lambda *_args, **_kwargs: "https://invite.example")
+    monkeypatch.setattr(
+        manager,
+        "_complete_registration",
+        lambda email, *_args, **_kwargs: attempted.append(email) or None,
+    )
+    monkeypatch.setattr(manager, "add_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+
+    result = manager.create_new_account(fake_chatgpt, fake_mail)
+
+    assert result is None
+    assert attempted == ["first@example.com", "second@example.com"]
+    assert "recent@example.com" not in attempted
+    assert [
+        (email, fields.get("pending_invite_last_attempt_error"))
+        for email, fields in updates
+        if "pending_invite_last_attempt_error" in fields
+    ] == [
+        ("first@example.com", None),
+        ("first@example.com", "registration_failed"),
+        ("second@example.com", None),
+        ("second@example.com", "registration_failed"),
+    ]
+
+
 def test_ensure_local_pending_invite_account_clears_old_disabled_flag(monkeypatch):
     fake_mail = _FakeCfMail()
     updates = []
