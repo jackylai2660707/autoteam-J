@@ -71,6 +71,20 @@ export const api = {
     ...(String(inviteDomains || '').trim() ? { invite_domains: String(inviteDomains || '').trim() } : {}),
     ...(maxChatgptActive === null ? {} : { max_chatgpt_active: Math.max(1, Math.min(5, Number(maxChatgptActive) || 2)) }),
   }),
+  startClearPendingInvites: (accountId = '', concurrency = 4, confirm = false) => request('POST', '/tasks/invites/clear', {
+    account_id: accountId,
+    concurrency: Math.max(1, Math.min(8, Number(concurrency) || 4)),
+    confirm: !!confirm,
+  }),
+  startBulkInvite: (accountId = '', emails = '', concurrency = 3, confirm = false) => request('POST', '/tasks/invites/bulk', {
+    account_id: accountId,
+    emails,
+    concurrency: Math.max(1, Math.min(8, Number(concurrency) || 3)),
+    batch_size: 20,
+    seat_type: 'usage_based',
+    resend_emails: true,
+    confirm: !!confirm,
+  }),
   startAutoDetectReplace: (email = '', accountId = '', replaceMode = '') => request('POST', '/tasks/auto-detect-replace', {
     email,
     account_id: accountId,

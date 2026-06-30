@@ -102,6 +102,10 @@ function formatParams(params) {
     account_id: 'Team',
     email: 'pending邮箱',
     invite_domains: 'invite域名池',
+    emails_count: '邮箱数',
+    concurrency: '并发',
+    batch_size: '批大小',
+    confirm: '确认',
     replace_with_pending_invite: '自动补位',
     replace_mode: '补位模式',
     trigger: '触发',
@@ -127,6 +131,8 @@ function commandLabel(command) {
     'manage-teams': '多 Team 调度',
     'consume-pending-invite': '消费 pending invite',
     'create-invite': '新增 invite 注册',
+    'bulk-invite': '批量发送 invite',
+    'clear-pending-invites': '清空 pending invite',
     check: 'quota 检查',
     rotate: 'swap_seat',
   }[command] || command
@@ -159,6 +165,14 @@ function formatResult(result) {
   }
   if (result.mode === 'consume_pending_invite') {
     return `${result.invited ? '已消费pending' : '未消费pending'} · ${result.email || result.requested_email || '-'} · ${result.reason || '-'}`
+  }
+  if (result.mode === 'bulk_invite') {
+    const summary = result.summary || {}
+    return `已发送 ${summary.sent || 0}/${summary.requested || 0} · 失败 ${summary.failed || 0} · 无效 ${summary.invalid || 0}`
+  }
+  if (result.mode === 'clear_pending_invites') {
+    const summary = result.summary || {}
+    return `已清理 ${summary.deleted || 0}/${summary.scanned || 0} · 失败 ${summary.failed || 0}`
   }
   if (result.mode === 'create_invite') {
     return `${result.invited ? '已新增invite' : '未新增invite'} · ${result.email || '-'} · ${result.reason || '-'}`

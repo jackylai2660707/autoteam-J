@@ -1538,6 +1538,22 @@ class InviteAddParams(BaseModel):
     invite_domains: str | None = None
 
 
+class ClearPendingInvitesParams(BaseModel):
+    account_id: str | None = None
+    confirm: bool = False
+    concurrency: int | None = None
+
+
+class BulkInviteParams(BaseModel):
+    account_id: str | None = None
+    emails: str | list[str] = ""
+    confirm: bool = False
+    seat_type: str = "usage_based"
+    concurrency: int | None = None
+    batch_size: int | None = None
+    resend_emails: bool = True
+
+
 class ManageTeamsParams(BaseModel):
     max_chatgpt_active: int | None = None
     replace_with_pending_invite: bool | None = None
@@ -2897,6 +2913,84 @@ def post_invite_add(params: InviteAddParams = InviteAddParams()):
         active_limit,
         team_context,
         **task_kwargs,
+    )
+    return task
+
+
+@app.post("/api/tasks/invites/clear", status_code=202)
+def post_clear_pending_invites(params: ClearPendingInvitesParams = ClearPendingInvitesParams()):
+    """显式清空目标 Team 的 pending invites；不移除任何 Team member。"""
+    from autoteam.admin_state import get_admin_session_token, get_chatgpt_account_id
+    from autoteam.manager import cmd_clear_pending_invites
+    from autoteam.team_context import get_team_context
+
+    if not params.confirm:
+        raise HTTPException(status_code=400, detail="清空 pending invite 会取消所有未接受邀请；请传 confirm=true 显式确认")
+
+    default_limit = _normalize_swap_active_limit(_auto_check_config.get("target_seats", 2))
+    team_context = get_team_context(params.account_id, default_max_chatgpt_active=default_limit) if params.account_id else None
+    if params.account_id and not team_context:
+        raise HTTPException(status_code=404, detail=f"未找到 Team 配置: {params.account_id}")
+    session_present = bool(getattr(team_context, "session_token", "") if team_context else get_admin_session_token())
+    resolved_account_id = str(getattr(team_context, "account_id", "") if team_context else get_chatgpt_account_id()).strip()
+    if not session_present or not resolved_account_id:
+        raise HTTPException(status_code=400, detail="请先完成管理员登录")
+
+    concurrency = max(1, min(8, int(params.concurrency or 4)))
+    task = _start_task(
+        "clear-pending-invites",
+        cmd_clear_pending_invites,
+        {"account_id": params.account_id or "", "concurrency": concurrency, "confirm": True},
+        team_context=team_context,
+        concurrency=concurrency,
+    )
+    return task
+
+
+@app.post("/api/tasks/invites/bulk", status_code=202)
+def post_bulk_invite(params: BulkInviteParams):
+    """并发批量发送 Team invites；只发送邀请，不注册账号/不上传 PAT。"""
+    from autoteam.admin_state import get_admin_session_token, get_chatgpt_account_id
+    from autoteam.manager import cmd_bulk_invite
+    from autoteam.team_context import get_team_context
+
+    if not params.confirm:
+        raise HTTPException(status_code=400, detail="批量 invite 会真实发送 Team 邀请邮件；请传 confirm=true 显式确认")
+
+    default_limit = _normalize_swap_active_limit(_auto_check_config.get("target_seats", 2))
+    team_context = get_team_context(params.account_id, default_max_chatgpt_active=default_limit) if params.account_id else None
+    if params.account_id and not team_context:
+        raise HTTPException(status_code=404, detail=f"未找到 Team 配置: {params.account_id}")
+    session_present = bool(getattr(team_context, "session_token", "") if team_context else get_admin_session_token())
+    resolved_account_id = str(getattr(team_context, "account_id", "") if team_context else get_chatgpt_account_id()).strip()
+    if not session_present or not resolved_account_id:
+        raise HTTPException(status_code=400, detail="请先完成管理员登录")
+
+    emails = params.emails
+    if isinstance(emails, str) and not emails.strip():
+        raise HTTPException(status_code=400, detail="请填写至少 1 个邮箱")
+    if isinstance(emails, list) and not [item for item in emails if str(item or "").strip()]:
+        raise HTTPException(status_code=400, detail="请填写至少 1 个邮箱")
+
+    concurrency = max(1, min(8, int(params.concurrency or 3)))
+    batch_size = max(1, min(50, int(params.batch_size or 20)))
+    task = _start_task(
+        "bulk-invite",
+        cmd_bulk_invite,
+        {
+            "account_id": params.account_id or "",
+            "emails_count": len(emails) if isinstance(emails, list) else len(re.split(r"[,;\s]+", emails.strip())),
+            "seat_type": params.seat_type,
+            "concurrency": concurrency,
+            "batch_size": batch_size,
+            "confirm": True,
+        },
+        emails,
+        team_context=team_context,
+        seat_type=params.seat_type,
+        concurrency=concurrency,
+        batch_size=batch_size,
+        resend_emails=params.resend_emails,
     )
     return task
 

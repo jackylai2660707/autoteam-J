@@ -254,8 +254,9 @@ def test_check_codex_quota_uses_wham_usage_endpoint():
     status, info = client.check_codex_quota()
 
     assert status == "exhausted"
-    assert info["window"] == "primary"
-    assert info["quota_info"]["primary_pct"] == 100
+    assert info["window"] == "monthly"
+    assert info["quota_info"]["primary_applicable"] is False
+    assert info["quota_info"]["monthly_pct"] == 100
     assert [call["path"] for call in transport.calls] == ["/backend-api/wham/usage"]
 
 
@@ -297,6 +298,19 @@ def test_team_api_guard_allows_invite_only_when_explicitly_enabled():
         client._assert_team_api_mutation_allowed("PATCH", "/backend-api/accounts/acc-1/invites/inv-1")
 
 
+def test_team_api_guard_allows_invite_cleanup_only_when_explicitly_enabled():
+    client = chatgpt_api.ChatGPTTeamAPI()
+
+    with pytest.raises(RuntimeError, match="pending invite 清理默认禁用"):
+        client._assert_team_api_mutation_allowed("DELETE", "/backend-api/accounts/acc-1/invites")
+
+    client.allow_team_invite_cleanup = True
+    client._assert_team_api_mutation_allowed("DELETE", "/backend-api/accounts/acc-1/invites")
+
+    with pytest.raises(RuntimeError, match="不支持的 invite 清理路径"):
+        client._assert_team_api_mutation_allowed("DELETE", "/backend-api/accounts/acc-1/invites/inv-1")
+
+
 def test_invite_member_temporarily_allows_post_invites():
     transport = _FakeTransport(lambda _call, _idx: {"status": 200, "body": '{"ok":true}'})
     client = chatgpt_api.ChatGPTTeamAPI()
@@ -320,5 +334,27 @@ def test_invite_member_temporarily_allows_post_invites():
                 "seat_type": "usage_based",
                 "resend_emails": True,
             },
+        }
+    ]
+
+
+def test_cancel_invite_temporarily_allows_delete_invites():
+    transport = _FakeTransport(lambda _call, _idx: {"status": 200, "body": '{"success":true}'})
+    client = chatgpt_api.ChatGPTTeamAPI()
+    client.account_id = "acc-1"
+    client.http_transport = transport
+    client.allow_team_invite_cleanup = False
+
+    status, data = client.cancel_invite("Pending@Example.com")
+
+    assert status == 200
+    assert data == {"success": True}
+    assert client.allow_team_invite_cleanup is False
+    assert transport.calls == [
+        {
+            "method": "DELETE",
+            "path": "/backend-api/accounts/acc-1/invites",
+            "headers": transport.calls[0]["headers"],
+            "body": {"email_address": "pending@example.com"},
         }
     ]

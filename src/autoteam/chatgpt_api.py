@@ -1567,13 +1567,18 @@ class ChatGPTTeamAPI:
         method_u = str(method or "").upper()
         path_s = str(path or "")
 
-        if method_u == "DELETE" and "/backend-api/accounts/" in path_s and (
-            "/users/" in path_s or "/invites/" in path_s
-        ):
+        if method_u == "DELETE" and "/backend-api/accounts/" in path_s and "/users/" in path_s:
             raise RuntimeError(
-                "swap_seat-only safety guard: Team member kick/remove 和 invite cancel 已禁用，"
+                "swap_seat-only safety guard: Team member kick/remove 已禁用，"
                 "只能 PATCH /users/{id} 修改 seat_type"
             )
+        if method_u == "DELETE" and "/backend-api/accounts/" in path_s and "/invites" in path_s:
+            if not bool(getattr(self, "allow_team_invite_cleanup", False)):
+                raise RuntimeError(
+                    "Team API safety guard: pending invite 清理默认禁用；只能通过显式清理任务执行"
+                )
+            if not re.match(r"^/backend-api/accounts/[^/]+/invites/?$", path_s.rstrip("/")):
+                raise RuntimeError("Team API safety guard: 不支持的 invite 清理路径")
         if method_u == "POST" and path_s.rstrip("/").endswith("/invites"):
             if not bool(getattr(self, "allow_team_invites", False)):
                 raise RuntimeError(
@@ -1633,15 +1638,20 @@ class ChatGPTTeamAPI:
         return result
 
     def invite_member(self, email, seat_type="usage_based"):
+        status, data = self.invite_members([email], seat_type=seat_type, resend_emails=True)
+        return status, data
+
+    def invite_members(self, emails, seat_type="usage_based", *, resend_emails=True):
         path = f"/backend-api/accounts/{self.account_id}/invites"
+        email_addresses = [str(email or "").strip().lower() for email in emails or [] if str(email or "").strip()]
         body = {
-            "email_addresses": [email],
+            "email_addresses": email_addresses,
             "role": "standard-user",
             "seat_type": seat_type,
-            "resend_emails": True,
+            "resend_emails": bool(resend_emails),
         }
 
-        logger.info("[ChatGPT] 创建 Team invite: %s (seat_type=%s)...", email, seat_type)
+        logger.info("[ChatGPT] 创建 Team invite: %d 个 (seat_type=%s)...", len(email_addresses), seat_type)
         previous_allow = bool(getattr(self, "allow_team_invites", False))
         self.allow_team_invites = True
         try:
@@ -1655,6 +1665,27 @@ class ChatGPTTeamAPI:
         except Exception:
             data = resp_body
         logger.info("[ChatGPT] Team invite 创建响应: HTTP %d", status)
+        return status, data
+
+    def cancel_invite(self, email):
+        path = f"/backend-api/accounts/{self.account_id}/invites"
+        email_address = str(email or "").strip().lower()
+        body = {"email_address": email_address}
+
+        logger.info("[ChatGPT] 清理 pending Team invite: %s...", email_address)
+        previous_allow = bool(getattr(self, "allow_team_invite_cleanup", False))
+        self.allow_team_invite_cleanup = True
+        try:
+            result = self._api_fetch("DELETE", path, body)
+        finally:
+            self.allow_team_invite_cleanup = previous_allow
+        status = int(result.get("status") or 0)
+        resp_body = str(result.get("body") or "")
+        try:
+            data = json.loads(resp_body)
+        except Exception:
+            data = resp_body
+        logger.info("[ChatGPT] Team invite 清理响应: HTTP %d", status)
         return status, data
 
     def _update_invite_seat_type(self, invite_id, seat_type):

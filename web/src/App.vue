@@ -241,6 +241,8 @@ function commandLabel(command) {
     'manage-teams': '多 Team 调度',
     'consume-pending-invite': '消费 pending invite',
     'create-invite': '新增 invite 注册',
+    'bulk-invite': '批量发送 invite',
+    'clear-pending-invites': '清空 pending invite',
     check: 'quota 检查',
     rotate: 'swap_seat',
   }[command] || command

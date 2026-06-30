@@ -409,6 +409,61 @@ def test_cmd_invite_add_passes_invite_domains_to_create_new_invited_account(monk
     ]
 
 
+def test_cmd_clear_pending_invites_deletes_by_email(monkeypatch):
+    class _InviteChatGPT(_FakeChatGPT):
+        def __init__(self):
+            super().__init__()
+            self.delete_calls = []
+
+        def list_invites(self):
+            return [
+                {"email_address": "one@example.com", "id": "inv-1", "status": "pending"},
+                {"email_address": "two@example.com", "id": "inv-2", "status": "pending"},
+                {"email_address": "joined@example.com", "id": "inv-accepted", "status": "accepted"},
+                {"email_address": "one@example.com", "id": "inv-dup", "status": "pending"},
+            ]
+
+        def cancel_invite(self, email):
+            self.delete_calls.append(email)
+            return 200, {"success": True}
+
+    fake_chatgpt = _InviteChatGPT()
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: fake_chatgpt)
+
+    result = manager.cmd_clear_pending_invites(concurrency=1)
+
+    assert result["mode"] == "clear_pending_invites"
+    assert result["summary"] == {"scanned": 4, "deleted": 2, "failed": 0}
+    assert fake_chatgpt.delete_calls == ["one@example.com", "two@example.com"]
+
+
+def test_cmd_bulk_invite_sends_deduped_batches(monkeypatch):
+    class _InviteChatGPT(_FakeChatGPT):
+        def __init__(self):
+            super().__init__()
+            self.batch_calls = []
+
+        def invite_members(self, emails, seat_type="usage_based", *, resend_emails=True):
+            self.batch_calls.append((list(emails), seat_type, resend_emails))
+            return 200, {"account_invites": [{"email_address": email} for email in emails], "errored_emails": []}
+
+    fake_chatgpt = _InviteChatGPT()
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: fake_chatgpt)
+
+    result = manager.cmd_bulk_invite(
+        "one@example.com two@example.com one@example.com",
+        concurrency=1,
+        batch_size=1,
+    )
+
+    assert result["mode"] == "bulk_invite"
+    assert result["summary"] == {"requested": 2, "sent": 2, "failed": 0, "invalid": 0, "batches": 2}
+    assert fake_chatgpt.batch_calls == [
+        (["one@example.com"], "usage_based", True),
+        (["two@example.com"], "usage_based", True),
+    ]
+
+
 def test_activate_registered_account_promotes_new_member_without_disabling_old_oauth(monkeypatch):
     fake_chatgpt = _FakeChatGPT()
     updates = []

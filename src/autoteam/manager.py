@@ -16,10 +16,12 @@ import getpass
 import json
 import logging
 import os
+import re
 import secrets
 import string
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from autoteam.account_ops import fetch_team_members, fetch_team_state
@@ -174,6 +176,64 @@ AUTH_REPAIR_SINGLE_ATTEMPT_FAILURE_TYPES = {"add_phone", "human_verification"}
 
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
+
+
+def _parse_email_list(value) -> tuple[list[str], list[str]]:
+    if value is None:
+        raw_parts = []
+    elif isinstance(value, (list, tuple, set)):
+        raw_parts = [str(item or "") for item in value]
+    else:
+        raw_parts = re.split(r"[,;\s]+", str(value or ""))
+
+    emails = []
+    invalid = []
+    seen = set()
+    for part in raw_parts:
+        email = _normalized_email(part)
+        if not email:
+            continue
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            invalid.append(email)
+            continue
+        if email in seen:
+            continue
+        seen.add(email)
+        emails.append(email)
+    return emails, invalid
+
+
+def _invite_email(invite: dict | None) -> str:
+    invite = invite or {}
+    return _normalized_email(invite.get("email_address") or invite.get("email"))
+
+
+def _is_pending_invite(invite: dict | None) -> bool:
+    invite = invite or {}
+    status = str(invite.get("status") or "").strip().lower()
+    return not status or status == "pending"
+
+
+def _normalize_invite_concurrency(value, *, default=3, maximum=8) -> int:
+    try:
+        count = int(value or default)
+    except Exception:
+        count = int(default)
+    return max(1, min(int(maximum), count))
+
+
+def _normalize_invite_batch_size(value, *, default=20, maximum=50) -> int:
+    try:
+        count = int(value or default)
+    except Exception:
+        count = int(default)
+    return max(1, min(int(maximum), count))
+
+
+def _chunked(items: list, size: int):
+    size = max(1, int(size or 1))
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
 
 
 def _truthy_env(value: str | None) -> bool:
@@ -3209,6 +3269,174 @@ def cmd_invite_add(
             pass
         if _chatgpt_session_ready(chatgpt):
             chatgpt.stop()
+
+
+def _run_team_invite_worker(team_context, callback):
+    chatgpt = ChatGPTTeamAPI()
+    try:
+        _abort_if_cancel_requested()
+        _start_chatgpt_for_team(chatgpt, team_context)
+        return callback(chatgpt)
+    finally:
+        if _chatgpt_session_ready(chatgpt):
+            chatgpt.stop()
+
+
+def cmd_clear_pending_invites(*, team_context=None, concurrency: int = 4) -> dict:
+    """显式清空当前 Team 的 pending invites；不删除 member。"""
+    _abort_if_cancel_requested()
+    concurrency = _normalize_invite_concurrency(concurrency, default=4, maximum=8)
+    chatgpt = ChatGPTTeamAPI()
+    _start_chatgpt_for_team(chatgpt, team_context)
+    try:
+        invites = chatgpt.list_invites()
+    finally:
+        if _chatgpt_session_ready(chatgpt):
+            chatgpt.stop()
+
+    emails = []
+    for invite in invites or []:
+        if not _is_pending_invite(invite):
+            continue
+        email = _invite_email(invite)
+        if email and email not in emails:
+            emails.append(email)
+
+    if not emails:
+        return {
+            "mode": "clear_pending_invites",
+            "team": _team_label(team_context),
+            "account_id": _team_account_id(team_context),
+            "scanned": len(invites or []),
+            "deleted": [],
+            "failed": [],
+            "summary": {"scanned": len(invites or []), "deleted": 0, "failed": 0},
+        }
+
+    def delete_one(email: str):
+        def _delete(chatgpt_api):
+            status, data = chatgpt_api.cancel_invite(email)
+            if status not in (200, 201, 202, 204):
+                raise RuntimeError(f"HTTP {status} {str(data)[:200]}")
+            if isinstance(data, dict) and data.get("success") is False:
+                raise RuntimeError(str(data)[:200])
+            return {"email": email, "status": status}
+
+        return _run_team_invite_worker(team_context, _delete)
+
+    deleted = []
+    failed = []
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(delete_one, email): email for email in emails}
+        for future in as_completed(futures):
+            _abort_if_cancel_requested()
+            email = futures[future]
+            try:
+                deleted.append(future.result())
+            except Exception as exc:
+                logger.warning("[pending invite 清理] %s 失败: %s", email, exc)
+                failed.append({"email": email, "error": str(exc)})
+
+    deleted.sort(key=lambda item: item.get("email") or "")
+    failed.sort(key=lambda item: item.get("email") or "")
+    return {
+        "mode": "clear_pending_invites",
+        "team": _team_label(team_context),
+        "account_id": _team_account_id(team_context),
+        "scanned": len(invites or []),
+        "concurrency": concurrency,
+        "deleted": deleted,
+        "failed": failed,
+        "summary": {"scanned": len(invites or []), "deleted": len(deleted), "failed": len(failed)},
+    }
+
+
+def cmd_bulk_invite(
+    emails,
+    *,
+    team_context=None,
+    seat_type: str = "usage_based",
+    concurrency: int = 3,
+    batch_size: int = 20,
+    resend_emails: bool = True,
+) -> dict:
+    """并发批量发送 Team invite；只发送邀请，不注册账号/不生成 PAT。"""
+    _abort_if_cancel_requested()
+    email_list, invalid = _parse_email_list(emails)
+    if not email_list:
+        raise RuntimeError("批量 invite 需要至少 1 个有效邮箱")
+
+    seat_type = str(seat_type or "usage_based").strip()
+    if seat_type not in {"usage_based", "default"}:
+        raise RuntimeError("seat_type 只允许 usage_based 或 default")
+
+    concurrency = _normalize_invite_concurrency(concurrency, default=3, maximum=8)
+    batch_size = _normalize_invite_batch_size(batch_size, default=20, maximum=50)
+    batches = list(_chunked(email_list, batch_size))
+
+    def send_batch(batch: list[str], batch_index: int):
+        def _send(chatgpt_api):
+            status, data = chatgpt_api.invite_members(batch, seat_type=seat_type, resend_emails=resend_emails)
+            if status not in (200, 201, 202, 204):
+                raise RuntimeError(f"HTTP {status} {str(data)[:200]}")
+            errored = []
+            accepted = batch
+            if isinstance(data, dict):
+                raw_errors = data.get("errored_emails") if isinstance(data.get("errored_emails"), list) else []
+                errored = [
+                    _normalized_email(item.get("email") or item.get("email_address") if isinstance(item, dict) else item)
+                    for item in raw_errors
+                ]
+                errored = [email for email in errored if email]
+                if errored:
+                    accepted = [email for email in batch if email not in set(errored)]
+            return {"batch": batch_index, "status": status, "sent": accepted, "errored": errored}
+
+        return _run_team_invite_worker(team_context, _send)
+
+    sent = []
+    failed = []
+    batch_results = []
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(send_batch, batch, index + 1): (index + 1, batch)
+            for index, batch in enumerate(batches)
+        }
+        for future in as_completed(futures):
+            _abort_if_cancel_requested()
+            batch_index, batch = futures[future]
+            try:
+                result = future.result()
+                batch_results.append(result)
+                sent.extend(result.get("sent") or [])
+                for email in result.get("errored") or []:
+                    failed.append({"email": email, "error": "errored_by_chatgpt"})
+            except Exception as exc:
+                logger.warning("[批量 invite] batch %s 失败: %s", batch_index, exc)
+                failed.extend({"email": email, "error": str(exc)} for email in batch)
+
+    sent = sorted(dict.fromkeys(sent))
+    failed.sort(key=lambda item: item.get("email") or "")
+    return {
+        "mode": "bulk_invite",
+        "team": _team_label(team_context),
+        "account_id": _team_account_id(team_context),
+        "requested": len(email_list),
+        "invalid": invalid,
+        "seat_type": seat_type,
+        "concurrency": concurrency,
+        "batch_size": batch_size,
+        "batches": sorted(batch_results, key=lambda item: item.get("batch") or 0),
+        "sent": sent,
+        "failed": failed,
+        "summary": {
+            "requested": len(email_list),
+            "sent": len(sent),
+            "failed": len(failed),
+            "invalid": len(invalid),
+            "batches": len(batches),
+        },
+    }
 
 
 def _normalize_auto_replace_mode(value: str | None = "pending_invite") -> str:

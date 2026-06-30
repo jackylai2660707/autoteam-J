@@ -69,7 +69,7 @@
     <div v-if="showParams" class="mt-4 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
       <div class="flex flex-wrap items-center gap-3">
         <label class="text-sm text-gray-400">{{ paramLabel }}:</label>
-        <input v-model.number="paramValue" type="number" min="1" :max="pendingAction?.paramName === 'max_chatgpt_active' ? 5 : 20"
+        <input v-model.number="paramValue" type="number" min="1" :max="paramMax"
           class="w-20 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
         <button @click="confirmAction" :disabled="!canSubmitPendingAction"
           class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition disabled:cursor-not-allowed disabled:opacity-50">
@@ -121,6 +121,54 @@
           </span>
         </label>
       </div>
+      <div
+        v-if="pendingAction?.key === 'bulk-invite'"
+        class="mt-3 rounded-lg border border-orange-500/20 bg-orange-500/10 px-3 py-3 text-xs text-orange-100"
+      >
+        <label class="mb-2 block text-sm font-medium text-orange-50">批量 invite 邮箱列表</label>
+        <textarea
+          v-model.trim="bulkInviteEmailsInput"
+          rows="6"
+          spellcheck="false"
+          placeholder="每行一个邮箱，也支持逗号/空格分隔&#10;user1@example.com&#10;user2@example.com"
+          class="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 font-mono text-xs text-white focus:border-orange-500 focus:outline-none"
+        ></textarea>
+        <div v-if="bulkInviteError" class="mt-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-red-200">
+          {{ bulkInviteError }}
+        </div>
+        <div v-else class="mt-2 rounded-lg border border-gray-700/70 bg-gray-900/70 px-3 py-2 text-gray-200">
+          将发送 {{ bulkInviteEmails.length }} 个 invite；后端按 20 个/批、并发 {{ paramValue || 3 }} 批执行。这里只发送邀请，不注册账号、不上传 PAT。
+        </div>
+        <label class="mt-3 flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100">
+          <input
+            v-model="confirmBulkInvite"
+            type="checkbox"
+            class="mt-0.5 rounded border-red-400/40 bg-gray-900 text-red-500 focus:ring-red-500"
+          />
+          <span>
+            <span class="font-medium text-red-50">确认批量发送真实 Team invite</span>
+            <span class="block text-red-200/80">
+              会向列表中的邮箱发送邀请邮件；不会自动消费这些 invite。
+            </span>
+          </span>
+        </label>
+      </div>
+      <label
+        v-if="pendingAction?.key === 'clear-pending-invites'"
+        class="mt-3 flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100"
+      >
+        <input
+          v-model="confirmClearPendingInvites"
+          type="checkbox"
+          class="mt-0.5 rounded border-red-400/40 bg-gray-900 text-red-500 focus:ring-red-500"
+        />
+        <span>
+          <span class="font-medium text-red-50">确认清空当前目标 Team 的所有 pending invite</span>
+          <span class="block text-red-200/80">
+            只取消未接受的邀请，不会移除 Team member，也不会删除 CPA auth。后端会先读取 pending 列表，再逐个按 email 删除。
+          </span>
+        </span>
+      </label>
       <label
         v-if="pendingAction?.key === 'manage-teams'"
         class="mt-3 flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100"
@@ -189,6 +237,8 @@ const actions = [
   { key: 'swap-seats', group: 'pool', label: '执行 swap_seat', method: 'startSwapSeats', needParam: true, paramName: 'max_chatgpt_active', style: 'bg-blue-600 text-white border-blue-500' },
   { key: 'auto-detect-replace', group: 'pool', label: '目标 Team 自动检测并替换', method: 'startAutoDetectReplace', needParam: false, style: 'bg-cyan-600 text-white border-cyan-500' },
   { key: 'invite-add', group: 'pool', label: '新增 invite 注册', method: 'startInviteAdd', needParam: true, paramName: 'max_chatgpt_active', style: 'bg-emerald-600 text-white border-emerald-500' },
+  { key: 'bulk-invite', group: 'pool', label: '批量发送 invite', method: 'startBulkInvite', needParam: true, paramName: 'concurrency', style: 'bg-orange-600 text-white border-orange-500' },
+  { key: 'clear-pending-invites', group: 'pool', label: '清空 pending invite', method: 'startClearPendingInvites', needParam: true, paramName: 'concurrency', style: 'bg-rose-600 text-white border-rose-500' },
   { key: 'manage-teams', group: 'pool', label: '多 Team 自动调度', method: 'startManageTeams', needParam: true, paramName: 'max_chatgpt_active', style: 'bg-indigo-600 text-white border-indigo-500' },
 ]
 
@@ -203,6 +253,9 @@ const replaceWithPendingInvite = ref(true)
 const replaceMode = ref('')
 const inviteDomainsInput = ref('')
 const confirmCreateInvite = ref(false)
+const bulkInviteEmailsInput = ref('')
+const confirmBulkInvite = ref(false)
+const confirmClearPendingInvites = ref(false)
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const selectableTeams = computed(() => {
   const teams = Array.isArray(props.teams) ? props.teams : []
@@ -220,6 +273,7 @@ const panelTitle = computed(() => {
   if (props.mode === 'pool') return 'Seat 调度'
   return '操作'
 })
+const paramMax = computed(() => pendingAction.value?.paramName === 'max_chatgpt_active' ? 5 : 8)
 const adminHint = computed(() => {
   return '请先在「配置面板」页完成管理员登录；swap_seat 只会切换 seat 和 CPA OAuth active/disabled，不会 kick Team 成员。'
 })
@@ -230,11 +284,25 @@ const inviteDomainError = computed(() => {
   if (!raw) return ''
   return inviteDomainOptions.value.length ? '' : '请填写有效域名，例如 example.com、*.example.com 或 xxxxx.example.com'
 })
+const bulkInviteEmails = computed(() => parseEmailList(bulkInviteEmailsInput.value).emails)
+const bulkInviteInvalidEmails = computed(() => parseEmailList(bulkInviteEmailsInput.value).invalid)
+const bulkInviteError = computed(() => {
+  if (pendingAction.value?.key !== 'bulk-invite') return ''
+  if (!String(bulkInviteEmailsInput.value || '').trim()) return '请填写至少 1 个邮箱'
+  if (bulkInviteInvalidEmails.value.length) return `以下邮箱格式无效：${bulkInviteInvalidEmails.value.slice(0, 3).join(', ')}`
+  return bulkInviteEmails.value.length ? '' : '请填写至少 1 个有效邮箱'
+})
 const canSubmitPendingAction = computed(() => {
   const action = pendingAction.value
   if (!action || isDisabled(action)) return false
   if (action.key === 'invite-add') {
     return confirmCreateInvite.value && !inviteDomainError.value
+  }
+  if (action.key === 'bulk-invite') {
+    return confirmBulkInvite.value && !bulkInviteError.value
+  }
+  if (action.key === 'clear-pending-invites') {
+    return confirmClearPendingInvites.value
   }
   return true
 })
@@ -273,7 +341,7 @@ watch(
 )
 
 function requiresExplicitTeam(action) {
-  return multiTeamMode.value && ['swap-seats', 'auto-detect-replace', 'invite-add'].includes(action.key)
+  return multiTeamMode.value && ['swap-seats', 'auto-detect-replace', 'invite-add', 'bulk-invite', 'clear-pending-invites'].includes(action.key)
 }
 
 function isDisabled(action) {
@@ -314,6 +382,24 @@ function parseInviteDomainOptions(value) {
     .filter(Boolean)
 }
 
+function parseEmailList(value) {
+  const seen = new Set()
+  const emails = []
+  const invalid = []
+  for (const part of String(value || '').split(/[,;\s]+/)) {
+    const email = part.trim().toLowerCase()
+    if (!email) continue
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      invalid.push(email)
+      continue
+    }
+    if (seen.has(email)) continue
+    seen.add(email)
+    emails.push(email)
+  }
+  return { emails, invalid }
+}
+
 async function execute(action) {
   if (isDisabled(action)) return
   message.value = ''
@@ -322,6 +408,9 @@ async function execute(action) {
     replaceWithPendingInvite.value = true
     replaceMode.value = ''
     confirmCreateInvite.value = false
+    confirmBulkInvite.value = false
+    confirmClearPendingInvites.value = false
+    bulkInviteEmailsInput.value = ''
     inviteDomainsInput.value = action.key === 'invite-add'
       ? String(selectedTeam.value?.invite_domains || '').trim()
       : ''
@@ -329,12 +418,18 @@ async function execute(action) {
       ? '默认 ChatGPT/OAuth active 保留数（1~5；Team 配置优先）'
       : action.key === 'invite-add'
         ? '注册后 ChatGPT/OAuth active 保留数（1~5）'
+      : action.key === 'bulk-invite'
+        ? '并发批次数（1~8）'
+      : action.key === 'clear-pending-invites'
+        ? '并发删除数（1~8）'
       : action.paramName === 'max_chatgpt_active'
         ? 'ChatGPT/OAuth active 保留数（1~5）'
         : '目标成员数'
     paramValue.value = action.paramName === 'max_chatgpt_active'
       ? Number(action.key === 'manage-teams' ? 2 : (selectedTeam.value?.max_chatgpt_active || 2))
-      : 5
+      : action.key === 'clear-pending-invites'
+        ? 4
+        : 3
     showParams.value = true
     return
   }
@@ -354,7 +449,10 @@ function cancelParams() {
   showParams.value = false
   pendingAction.value = null
   confirmCreateInvite.value = false
+  confirmBulkInvite.value = false
+  confirmClearPendingInvites.value = false
   inviteDomainsInput.value = ''
+  bulkInviteEmailsInput.value = ''
 }
 
 async function doExecute(action, param) {
@@ -374,6 +472,15 @@ async function doExecute(action, param) {
         true,
         inviteDomainsInput.value,
       )
+    } else if (action.key === 'bulk-invite') {
+      result = await api.startBulkInvite(
+        selectedAccountId.value,
+        bulkInviteEmails.value.join('\n'),
+        normalizedParam,
+        true,
+      )
+    } else if (action.key === 'clear-pending-invites') {
+      result = await api.startClearPendingInvites(selectedAccountId.value, normalizedParam, true)
     } else if (action.key === 'manage-teams') {
       result = await api.startManageTeams(normalizedParam, replaceWithPendingInvite.value, replaceMode.value)
     } else {
