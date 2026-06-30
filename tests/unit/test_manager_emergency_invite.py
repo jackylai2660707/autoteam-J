@@ -77,7 +77,13 @@ class _RecordingMail(_FakeCfMail):
 
     def search_emails_by_recipient(self, to_email, size=10, account_id=None):
         self.search_calls.append((to_email, size, account_id))
-        return [{"sendEmail": "noreply@openai.com", "subject": "Invite", "body": "invite"}]
+        return [
+            {
+                "sendEmail": "noreply@openai.com",
+                "subject": "Invite",
+                "body": "invite for sips.bonier.5d@icloud.com",
+            }
+        ]
 
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
         self.wait_calls.append((to_email, timeout, sender_keyword))
@@ -121,8 +127,47 @@ def test_forwarded_recipient_mail_client_reads_from_delivery_mailbox(monkeypatch
 
     assert emails
     assert email_item["subject"] == "Invite"
-    assert base.search_calls == [("jackylai@latte-fitness.com", 7, "addr-forward")]
-    assert base.wait_calls == [("jackylai@latte-fitness.com", 12, "openai")]
+    assert base.search_calls == [
+        ("jackylai@latte-fitness.com", 50, "addr-forward"),
+        ("jackylai@latte-fitness.com", 50, "addr-forward"),
+    ]
+    assert base.wait_calls == []
+
+
+def test_forwarded_recipient_mail_client_filters_to_original_recipient(monkeypatch):
+    monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "icloud.com=jackylai@latte-fitness.com")
+
+    class _ForwardInboxMail(_RecordingMail):
+        def search_emails_by_recipient(self, to_email, size=10, account_id=None):
+            self.search_calls.append((to_email, size, account_id))
+            return [
+                {
+                    "sendEmail": "noreply@openai.com",
+                    "subject": "plus alias code",
+                    "raw": (
+                        "for <46.answer-gasses+2@icloud.com>\n"
+                        "X-ICLOUD-HME: p=46.answer-gasses@icloud.com; f=jackylai@latte-fitness.com"
+                    ),
+                },
+                {
+                    "sendEmail": "noreply@openai.com",
+                    "subject": "base code",
+                    "raw": "for <46.answer-gasses@icloud.com>",
+                },
+                {
+                    "sendEmail": "noreply@openai.com",
+                    "subject": "other code",
+                    "body": "Enter the code sent to other@icloud.com",
+                },
+            ]
+
+    wrapped = manager._with_pending_invite_forwarding(_ForwardInboxMail())
+
+    base_emails = wrapped.search_emails_by_recipient("46.answer-gasses@icloud.com")
+    plus_emails = wrapped.search_emails_by_recipient("46.answer-gasses+2@icloud.com")
+
+    assert [item["subject"] for item in base_emails] == ["base code"]
+    assert [item["subject"] for item in plus_emails] == ["plus alias code"]
 
 
 def test_pending_invite_candidates_allow_mapped_non_cfmail_domain(monkeypatch):
@@ -200,10 +245,13 @@ def test_cmd_add_consumes_pending_invite_and_activates_new_account(monkeypatch):
     monkeypatch.setattr(
         manager,
         "create_new_account",
-        lambda chatgpt, mail_client, **_kwargs: created.append((chatgpt.allow_team_invites, mail_client.provider_name))
-        or "new@example.com",
+        lambda chatgpt, mail_client, **_kwargs: (
+            created.append((chatgpt.allow_team_invites, mail_client.provider_name)) or "new@example.com"
+        ),
     )
-    monkeypatch.setattr(manager, "_activate_registered_account", lambda chatgpt, email, **_kwargs: {"ok": True, "email": email})
+    monkeypatch.setattr(
+        manager, "_activate_registered_account", lambda chatgpt, email, **_kwargs: {"ok": True, "email": email}
+    )
     monkeypatch.setattr(manager, "_post_registration_seat_rebalance", lambda chatgpt, **_kwargs: {"mode": "swap_seat"})
 
     result = manager.cmd_add()
@@ -238,7 +286,9 @@ def test_create_new_account_consumes_existing_pending_invite_without_pre_sweepin
         lambda email, password, **kwargs: added.append((email, password, kwargs)),
     )
     monkeypatch.setattr(manager, "update_account", lambda *args, **kwargs: None)
-    monkeypatch.setattr(manager, "_complete_registration", lambda email, password, invite_link, mail_client, **_kwargs: email)
+    monkeypatch.setattr(
+        manager, "_complete_registration", lambda email, password, invite_link, mail_client, **_kwargs: email
+    )
 
     result = manager.create_new_account(fake_chatgpt, fake_mail)
 
@@ -312,7 +362,9 @@ def test_create_new_invited_account_creates_cfmail_invite_and_registers(monkeypa
         lambda email, password, **kwargs: added.append((email, password, kwargs)),
     )
     monkeypatch.setattr(manager, "update_account", lambda *args, **kwargs: None)
-    monkeypatch.setattr(manager, "_complete_registration", lambda email, password, invite_link, mail_client, **_kwargs: email)
+    monkeypatch.setattr(
+        manager, "_complete_registration", lambda email, password, invite_link, mail_client, **_kwargs: email
+    )
 
     result = manager.create_new_invited_account(fake_chatgpt, fake_mail)
 
@@ -387,7 +439,9 @@ def test_create_new_invited_account_retries_self_managed_pending_before_new_invi
     invites = [{"id": "inv-retry", "email_address": "retry@example.com", "seat_type": "usage_based"}]
 
     monkeypatch.setattr(manager, "_fetch_team_members_for_account", lambda _chatgpt, account_id=None: team_members)
-    monkeypatch.setattr(manager, "_fetch_team_state_for_account", lambda _chatgpt, account_id=None: (team_members, invites))
+    monkeypatch.setattr(
+        manager, "_fetch_team_state_for_account", lambda _chatgpt, account_id=None: (team_members, invites)
+    )
     monkeypatch.setattr(
         manager,
         "load_accounts",
@@ -405,7 +459,9 @@ def test_create_new_invited_account_retries_self_managed_pending_before_new_invi
         ],
     )
     monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
-    monkeypatch.setattr(manager, "_complete_registration", lambda email, password, invite_link, mail_client, **_kwargs: email)
+    monkeypatch.setattr(
+        manager, "_complete_registration", lambda email, password, invite_link, mail_client, **_kwargs: email
+    )
 
     result = manager.create_new_invited_account(fake_chatgpt, fake_mail)
 
@@ -475,10 +531,13 @@ def test_cmd_invite_add_creates_invite_and_activates_new_account_when_forced(mon
     monkeypatch.setattr(
         manager,
         "create_new_invited_account",
-        lambda chatgpt, mail_client, **_kwargs: created.append((chatgpt.started, mail_client.provider_name))
-        or "new@example.com",
+        lambda chatgpt, mail_client, **_kwargs: (
+            created.append((chatgpt.started, mail_client.provider_name)) or "new@example.com"
+        ),
     )
-    monkeypatch.setattr(manager, "_activate_registered_account", lambda chatgpt, email, **_kwargs: {"ok": True, "email": email})
+    monkeypatch.setattr(
+        manager, "_activate_registered_account", lambda chatgpt, email, **_kwargs: {"ok": True, "email": email}
+    )
     monkeypatch.setattr(manager, "_post_registration_seat_rebalance", lambda chatgpt, **_kwargs: {"mode": "swap_seat"})
 
     result = manager.cmd_invite_add(force_create_invite=True)
@@ -636,7 +695,9 @@ def test_activate_registered_account_promotes_new_member_without_disabling_old_o
     monkeypatch.setattr(
         manager,
         "set_cpa_auth_disabled",
-        lambda auth, disabled: oauth_updates.append(((auth.get("name") if isinstance(auth, dict) else auth), disabled)) or {"status": "ok"},
+        lambda auth, disabled: (
+            oauth_updates.append(((auth.get("name") if isinstance(auth, dict) else auth), disabled)) or {"status": "ok"}
+        ),
     )
     monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
 
@@ -689,13 +750,13 @@ def test_activate_registered_account_marks_auth_pending_without_demoting_when_cp
     assert updates == [
         (
             "new@example.com",
-                {
-                    "status": "auth_pending",
-                    "seat_type": "chatgpt",
-                    "disabled": False,
-                    "auth_last_error": "cpa_auth_missing_after_registration",
-                    "last_active_at": updates[0][1]["last_active_at"],
-                },
+            {
+                "status": "auth_pending",
+                "seat_type": "chatgpt",
+                "disabled": False,
+                "auth_last_error": "cpa_auth_missing_after_registration",
+                "last_active_at": updates[0][1]["last_active_at"],
+            },
         )
     ]
 
@@ -846,10 +907,10 @@ def test_cmd_manage_teams_runs_each_configured_team(monkeypatch):
     monkeypatch.setattr(
         manager,
         "cmd_auto_detect_replace",
-        lambda max_chatgpt_active=2, pending_invite_email=None, team_context=None, repair_before_replace=True, replace_mode="pending_invite": calls.append(
-            (team_context.account_id, max_chatgpt_active, repair_before_replace, replace_mode)
-        )
-        or {"mode": "auto_detect_replace", "team": team_context.label},
+        lambda max_chatgpt_active=2, pending_invite_email=None, team_context=None, repair_before_replace=True, replace_mode="pending_invite": (
+            calls.append((team_context.account_id, max_chatgpt_active, repair_before_replace, replace_mode))
+            or {"mode": "auto_detect_replace", "team": team_context.label}
+        ),
     )
 
     result = manager.cmd_manage_teams(max_chatgpt_active=2, replace_with_pending_invite=True)
@@ -871,7 +932,11 @@ def test_cmd_manage_teams_consumes_each_team_pending_invite_when_enabled(monkeyp
             self.pending_invite_email = pending_invite_email
 
         def public_dict(self):
-            return {"account_id": self.account_id, "label": self.label, "pending_invite_email": self.pending_invite_email}
+            return {
+                "account_id": self.account_id,
+                "label": self.label,
+                "pending_invite_email": self.pending_invite_email,
+            }
 
     teams = [
         _Team("acc-a", "Team A", "pending-a@example.com"),
@@ -883,10 +948,12 @@ def test_cmd_manage_teams_consumes_each_team_pending_invite_when_enabled(monkeyp
     monkeypatch.setattr(
         manager,
         "cmd_auto_detect_replace",
-        lambda max_chatgpt_active=2, pending_invite_email=None, team_context=None, repair_before_replace=True, replace_mode="pending_invite": calls.append(
-            (team_context.account_id, pending_invite_email, max_chatgpt_active, repair_before_replace, replace_mode)
-        )
-        or {"mode": "auto_detect_replace", "team": team_context.label},
+        lambda max_chatgpt_active=2, pending_invite_email=None, team_context=None, repair_before_replace=True, replace_mode="pending_invite": (
+            calls.append(
+                (team_context.account_id, pending_invite_email, max_chatgpt_active, repair_before_replace, replace_mode)
+            )
+            or {"mode": "auto_detect_replace", "team": team_context.label}
+        ),
     )
 
     result = manager.cmd_manage_teams(max_chatgpt_active=2, replace_with_pending_invite=True)
@@ -915,10 +982,9 @@ def test_cmd_manage_teams_can_skip_duplicate_pat_repair(monkeypatch):
     monkeypatch.setattr(
         manager,
         "cmd_auto_detect_replace",
-        lambda max_chatgpt_active=2, pending_invite_email=None, team_context=None, repair_before_replace=True, replace_mode="pending_invite": calls.append(
-            (repair_before_replace, replace_mode)
-        )
-        or {"mode": "auto_detect_replace"},
+        lambda max_chatgpt_active=2, pending_invite_email=None, team_context=None, repair_before_replace=True, replace_mode="pending_invite": (
+            calls.append((repair_before_replace, replace_mode)) or {"mode": "auto_detect_replace"}
+        ),
     )
 
     result = manager.cmd_manage_teams(
@@ -952,10 +1018,10 @@ def test_cmd_auto_detect_replace_consumes_pending_invite_when_team_has_no_chatgp
     monkeypatch.setattr(
         manager,
         "cmd_add",
-        lambda pending_invite_email=None, max_chatgpt_active=2, team_context=None: add_calls.append(
-            (pending_invite_email, max_chatgpt_active, team_context)
-        )
-        or {"mode": "consume_pending_invite", "invited": True, "reason": "pending_invite_registered"},
+        lambda pending_invite_email=None, max_chatgpt_active=2, team_context=None: (
+            add_calls.append((pending_invite_email, max_chatgpt_active, team_context))
+            or {"mode": "consume_pending_invite", "invited": True, "reason": "pending_invite_registered"}
+        ),
     )
     monkeypatch.setattr(
         manager,
@@ -988,10 +1054,10 @@ def test_cmd_auto_detect_replace_consumes_pending_invite_when_below_target(monke
     monkeypatch.setattr(
         manager,
         "cmd_add",
-        lambda pending_invite_email=None, max_chatgpt_active=2, team_context=None: add_calls.append(
-            (pending_invite_email, max_chatgpt_active, team_context)
-        )
-        or {"mode": "consume_pending_invite", "invited": True, "reason": "pending_invite_registered"},
+        lambda pending_invite_email=None, max_chatgpt_active=2, team_context=None: (
+            add_calls.append((pending_invite_email, max_chatgpt_active, team_context))
+            or {"mode": "consume_pending_invite", "invited": True, "reason": "pending_invite_registered"}
+        ),
     )
     monkeypatch.setattr(
         manager,
@@ -1025,15 +1091,17 @@ def test_cmd_auto_detect_replace_can_create_invite_when_below_target(monkeypatch
     monkeypatch.setattr(
         manager,
         "cmd_invite_add",
-        lambda max_chatgpt_active=2, team_context=None, force_create_invite=False: invite_calls.append(
-            (max_chatgpt_active, team_context, force_create_invite)
-        )
-        or {"mode": "create_invite", "invited": True, "reason": "new_invite_registered"},
+        lambda max_chatgpt_active=2, team_context=None, force_create_invite=False: (
+            invite_calls.append((max_chatgpt_active, team_context, force_create_invite))
+            or {"mode": "create_invite", "invited": True, "reason": "new_invite_registered"}
+        ),
     )
     monkeypatch.setattr(
         manager,
         "cmd_add",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("pending invite should not be consumed in create_invite mode")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pending invite should not be consumed in create_invite mode")
+        ),
     )
     monkeypatch.setattr(
         manager,
@@ -1109,7 +1177,9 @@ def test_cmd_auto_detect_replace_defers_replacement_when_recheck_fails_after_pat
     monkeypatch.setattr(
         manager,
         "cmd_add",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("pending invite should not be consumed after repaired PAT")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pending invite should not be consumed after repaired PAT")
+        ),
     )
     monkeypatch.setattr(
         manager,

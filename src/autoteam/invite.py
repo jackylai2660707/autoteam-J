@@ -48,6 +48,37 @@ def get_registration_error(page) -> dict | None:
     return error if isinstance(error, dict) else None
 
 
+def _email_numeric_marker(email_data) -> int:
+    for key in ("emailId", "id"):
+        try:
+            return int(email_data.get(key) or 0)
+        except Exception:
+            continue
+    return 0
+
+
+def _is_chatgpt_verification_email(email_data) -> bool:
+    subject = str(email_data.get("subject") or "").lower()
+    sender = str(email_data.get("sendEmail") or email_data.get("source") or "").lower()
+    if "invited" in subject or "invitation" in subject:
+        return False
+    return "verification code" in subject or "openai" in sender or "chatgpt" in sender
+
+
+def _latest_verification_email_marker(mail_client, email) -> int:
+    try:
+        emails = mail_client.search_emails_by_recipient(email, size=20)
+    except Exception:
+        return 0
+    markers = [_email_numeric_marker(item) for item in emails if _is_chatgpt_verification_email(item)]
+    return max(markers or [0])
+
+
+def _is_new_verification_email(email_data, baseline_marker: int) -> bool:
+    marker = _email_numeric_marker(email_data)
+    return not marker or marker > int(baseline_marker or 0)
+
+
 def screenshot(page, name):
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
     path = f"{SCREENSHOT_DIR}/{name}"
@@ -509,6 +540,10 @@ def register_with_invite(
     if _abort_if_google_signin(page, "reg_02_google_signin.png"):
         return False, password
 
+    verification_marker_baseline = _latest_verification_email_marker(mail_client, email)
+    if verification_marker_baseline:
+        logger.info("[注册] 已记录验证码邮件基线 id<=%s，本轮会忽略旧验证码", verification_marker_baseline)
+
     # 输入邮箱
     if not _submit_email_step(page, email):
         return False, password
@@ -564,16 +599,14 @@ def register_with_invite(
                 return False, password
             emails = mail_client.search_emails_by_recipient(email, size=10)
             for em in emails:
-                subject = em.get("subject", "").lower()
-                sender = em.get("sendEmail", "").lower()
-                # 跳过邀请邮件，只要验证码邮件
-                if "invited" in subject or "invitation" in subject:
+                if not _is_chatgpt_verification_email(em):
                     continue
-                if "openai" in sender or "chatgpt" in sender:
-                    verification_code = mail_client.extract_verification_code(em)
-                    if verification_code:
-                        logger.info("[CloudMail] 收到验证码: [redacted]")
-                        break
+                if not _is_new_verification_email(em, verification_marker_baseline):
+                    continue
+                verification_code = mail_client.extract_verification_code(em)
+                if verification_code:
+                    logger.info("[CloudMail] 收到验证码: [redacted]")
+                    break
             if verification_code:
                 break
             elapsed = int(time.time() - start)

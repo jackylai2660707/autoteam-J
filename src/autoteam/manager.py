@@ -13,6 +13,7 @@ swap_seat-only 管理器。
 """
 
 import getpass
+import html
 import json
 import logging
 import os
@@ -257,6 +258,8 @@ def _mail_delivery_email_for(email: str | None, acc: dict | None = None) -> str:
 class _ForwardedRecipientMailClient:
     """Use a forwarding mailbox for reads while keeping the account email unchanged."""
 
+    _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
     def __init__(self, base_client, mapping: dict[str, str] | None = None):
         self._base_client = base_client
         self._mapping = mapping or _parse_pending_invite_forward_map()
@@ -280,6 +283,56 @@ class _ForwardedRecipientMailClient:
         domain = _email_domain(target)
         return self._mapping.get(target) or self._mapping.get(domain) or target
 
+    @classmethod
+    def _extract_email_tokens(cls, value) -> set[str]:
+        text = html.unescape(str(value or ""))
+        return {_normalized_email(match.group(0)) for match in cls._EMAIL_RE.finditer(text)}
+
+    @classmethod
+    def _extract_for_header_recipients(cls, value) -> set[str]:
+        text = html.unescape(str(value or ""))
+        recipients = set()
+        for match in re.finditer(r"\bfor\s+<([^<>@\s]+@[^<>\s]+)>", text, re.IGNORECASE):
+            recipients.add(_normalized_email(match.group(1)))
+        return recipients
+
+    def _message_matches_requested_recipient(self, email_item, requested_email: str, delivery_email: str) -> bool:
+        target = _normalized_email(requested_email)
+        delivery = _normalized_email(delivery_email)
+        if not target:
+            return True
+
+        direct_fields = (
+            "accountEmail",
+            "receiveEmail",
+            "toEmail",
+            "mailAddress",
+            "email",
+        )
+        direct_values = {
+            _normalized_email(email_item.get(field))
+            for field in direct_fields
+            if _normalized_email(email_item.get(field))
+        }
+        if target in direct_values:
+            return True
+
+        # Forwarded iCloud messages include both the delivery mailbox and the original
+        # recipient in Received "for <...>" headers. Prefer those headers over loose
+        # body/header substring matches so base@icloud.com does not match base+1@icloud.com.
+        header_text = "\n".join(
+            str(email_item.get(field) or "") for field in ("raw", "content", "text", "body", "html")
+        )
+        forwarded_recipients = self._extract_for_header_recipients(header_text)
+        original_recipients = {email for email in forwarded_recipients if email != delivery}
+        if original_recipients:
+            return target in original_recipients
+
+        visible_text = "\n".join(
+            str(email_item.get(field) or "") for field in ("subject", "text", "body", "html", "content")
+        )
+        return target in self._extract_email_tokens(visible_text)
+
     def _resolve_account_id_for_email(self, to_email):
         mapped = self._forward_to(to_email)
         resolver = getattr(self._base_client, "_resolve_account_id_for_email", None)
@@ -288,18 +341,55 @@ class _ForwardedRecipientMailClient:
         return None
 
     def search_emails_by_recipient(self, to_email, size=10, account_id=None):
+        requested = _normalized_email(to_email)
         mapped = self._forward_to(to_email)
         mapped_account_id = account_id
-        if mapped != _normalized_email(to_email):
+        fetch_size = max(1, int(size or 10))
+        if mapped != requested:
             mapped_account_id = self._resolve_account_id_for_email(mapped)
             logger.info("[邮件转发] %s 的邮件将从 %s 读取", _normalized_email(to_email), mapped)
+            fetch_size = max(fetch_size, 50)
         try:
-            return self._base_client.search_emails_by_recipient(mapped, size=size, account_id=mapped_account_id)
+            emails = self._base_client.search_emails_by_recipient(
+                mapped,
+                size=fetch_size,
+                account_id=mapped_account_id,
+            )
         except TypeError:
-            return self._base_client.search_emails_by_recipient(mapped, size=size)
+            emails = self._base_client.search_emails_by_recipient(mapped, size=fetch_size)
+
+        if mapped == requested:
+            return emails
+
+        filtered = [
+            item
+            for item in emails
+            if self._message_matches_requested_recipient(item, requested_email=requested, delivery_email=mapped)
+        ]
+        if emails and not filtered:
+            logger.warning("[邮件转发] %s 的转发收件箱已有邮件，但未匹配到该原始收件人，已忽略", requested)
+        return filtered[: max(1, int(size or 10))]
 
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
+        requested = _normalized_email(to_email)
         mapped = self._forward_to(to_email)
+        if mapped != requested:
+            timeout = timeout or MAIL_TIMEOUT
+            start = time.time()
+            while time.time() - start < timeout:
+                emails = self.search_emails_by_recipient(requested, size=20)
+                for email_item in emails:
+                    sender = str(email_item.get("sendEmail") or email_item.get("source") or "")
+                    subject = str(email_item.get("subject") or "")
+                    if (
+                        sender_keyword
+                        and sender_keyword.lower() not in sender.lower()
+                        and sender_keyword.lower() not in subject.lower()
+                    ):
+                        continue
+                    return email_item
+                time.sleep(3)
+            raise TimeoutError("等待转发邮件超时")
         return self._base_client.wait_for_email(mapped, timeout=timeout, sender_keyword=sender_keyword)
 
     def delete_emails_for(self, to_email):
@@ -415,10 +505,7 @@ def _allow_member_email_login_for_pat() -> bool:
 def _account_chatgpt_session_token(acc: dict | None) -> str:
     acc = acc or {}
     return str(
-        acc.get("chatgpt_session_token")
-        or acc.get("member_session_token")
-        or acc.get("session_token")
-        or ""
+        acc.get("chatgpt_session_token") or acc.get("member_session_token") or acc.get("session_token") or ""
     ).strip()
 
 
@@ -436,7 +523,9 @@ def _account_chatgpt_account_id(acc: dict | None, team_context=None) -> str:
 def _account_record_team_account_id(acc: dict | None) -> str:
     """Return only the account_id explicitly saved on the local account record."""
     acc = acc or {}
-    return str(acc.get("chatgpt_account_id") or acc.get("workspace_account_id") or acc.get("team_account_id") or "").strip()
+    return str(
+        acc.get("chatgpt_account_id") or acc.get("workspace_account_id") or acc.get("team_account_id") or ""
+    ).strip()
 
 
 def _account_matches_team_context(acc: dict | None, team_context=None) -> bool:
@@ -452,7 +541,9 @@ def _team_or_session_account_id(session_info: dict | None = None, team_context=N
     """Prefer an explicit Team context over whatever workspace the browser last opened."""
     session_info = session_info or {}
     explicit_team_account_id = _team_account_id(team_context) if team_context is not None else ""
-    return str(explicit_team_account_id or session_info.get("chatgpt_account_id") or _team_account_id(None) or "").strip()
+    return str(
+        explicit_team_account_id or session_info.get("chatgpt_account_id") or _team_account_id(None) or ""
+    ).strip()
 
 
 def _chatgpt_session_update_fields(session_info: dict | None) -> dict:
@@ -945,7 +1036,9 @@ def _record_auth_repair_failure(
             disabled_auth_status = "failed"
             logger.warning("[认证修复] 停用硬失败账号的自管 CPA auth 失败 %s: %s", email, exc)
 
-    is_team_member = _is_email_in_team(email) if team_context is None else _is_email_in_team(email, team_context=team_context)
+    is_team_member = (
+        _is_email_in_team(email) if team_context is None else _is_email_in_team(email, team_context=team_context)
+    )
     if not is_team_member and acc.get("status") in (STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_AUTH_PENDING):
         is_team_member = True
 
@@ -1123,7 +1216,12 @@ def _create_pat_auth_with_login(
     bundle = result.get("bundle") if isinstance(result.get("bundle"), dict) else {}
     pat_auth = bundle.get("pat_auth") if isinstance(bundle.get("pat_auth"), dict) else {}
     if not pat_auth.get("auth_file"):
-        return {"ok": False, "error_type": "pat_export_failed", "error_detail": "PAT 导出成功但缺少 auth_file", "retryable": True}
+        return {
+            "ok": False,
+            "error_type": "pat_export_failed",
+            "error_detail": "PAT 导出成功但缺少 auth_file",
+            "retryable": True,
+        }
     return {"ok": True, "auth": pat_auth, "session": captured_session_info}
 
 
@@ -1153,7 +1251,11 @@ def _create_pat_auth_with_session(acc: dict, *, team_context=None) -> dict:
     except Exception as exc:
         detail = str(exc)
         lower = detail.lower()
-        error_type = "member_session_invalid" if "401" in lower or "unauthorized" in lower or "session_token" in lower else "pat_export_failed"
+        error_type = (
+            "member_session_invalid"
+            if "401" in lower or "unauthorized" in lower or "session_token" in lower
+            else "pat_export_failed"
+        )
         return {
             "ok": False,
             "error_type": error_type,
@@ -1260,14 +1362,18 @@ def cmd_repair_pat_auths(
             repair_chatgpt,
             _team_account_id(team_context) or getattr(repair_chatgpt, "account_id", ""),
         )
-        member_by_email = {_normalized_email(item.get("email")): item for item in members if _normalized_email(item.get("email"))}
+        member_by_email = {
+            _normalized_email(item.get("email")): item for item in members if _normalized_email(item.get("email"))
+        }
     except Exception as exc:
         logger.warning("[PAT修复] 无法读取 Team seat 状态，本轮不修复，避免给非 GPT seat 创建 PAT: %s", exc)
         repair_chatgpt = None
 
     if not member_by_email:
         for acc in candidates:
-            skipped.append({"email": _normalized_email(acc.get("email")), "reason": "team_member_missing_or_unreadable"})
+            skipped.append(
+                {"email": _normalized_email(acc.get("email")), "reason": "team_member_missing_or_unreadable"}
+            )
         candidates = []
     else:
         filtered_candidates = []
@@ -1881,7 +1987,9 @@ def _is_email_in_team(email, *, team_context=None):
     try:
         chatgpt = ChatGPTTeamAPI()
         _start_chatgpt_for_team(chatgpt, team_context)
-        members, _ = _fetch_team_state_for_account(chatgpt, _team_account_id(team_context) or getattr(chatgpt, "account_id", ""))
+        members, _ = _fetch_team_state_for_account(
+            chatgpt, _team_account_id(team_context) or getattr(chatgpt, "account_id", "")
+        )
         return any((m.get("email", "") or "").lower() == email.lower() for m in members)
     except Exception as exc:
         logger.warning("[直接注册] 检查 Team 成员失败: %s", exc)
@@ -2655,7 +2763,9 @@ def _create_random_cfmail_address(mail_client, *, attempts=5, invite_domains: st
     raise RuntimeError(last_error or "CFMail 创建地址失败")
 
 
-def _ensure_local_pending_invite_account(email, password, mail_client, account_id=None, *, team_context=None, team_account_id=None):
+def _ensure_local_pending_invite_account(
+    email, password, mail_client, account_id=None, *, team_context=None, team_account_id=None
+):
     """把 pending invite 对应账号落到本地账号池，转发邮箱只作为收信通道。"""
     email = _normalized_email(email)
     if not email:
@@ -2811,6 +2921,7 @@ def _wait_for_cpa_auth(email, *, timeout=45, managed_auth_names: set[str] | None
         if managed_auth_names is not None:
             auths = [auth for auth in auths if is_managed_cpa_auth(auth, managed_auth_names)]
         if auths:
+
             def _score(auth):
                 status = str(auth.get("status") or "").strip().lower()
                 ts = str(auth.get("updated_at") or auth.get("last_refresh") or auth.get("modtime") or "")
@@ -2889,7 +3000,12 @@ def _activate_registered_account(chatgpt_api, email, max_chatgpt_active=2, team_
             last_active_at=time.time(),
         )
         logger.warning("[注册新号] CPA auth 缺少 name/id，无法启用，保留当前 seat: %s seat=%s", target, current_seat)
-        return {"ok": False, "reason": "cpa_auth_missing_identifier", "email": target, "team": _team_label(team_context)}
+        return {
+            "ok": False,
+            "reason": "cpa_auth_missing_identifier",
+            "email": target,
+            "team": _team_label(team_context),
+        }
 
     all_auths = [auth for auth in list_cpa_files() if is_cpa_codex_oauth(auth)]
     auths = [auth for auth in all_auths if is_managed_cpa_auth(auth, managed_auth_names)]
@@ -3078,7 +3194,9 @@ def _pre_sweep_registration_team(chatgpt_api, max_chatgpt_active=2, team_context
     return active_limit, account_id, precheck
 
 
-def create_new_account(chatgpt_api, mail_client, pending_invite_email: str | None = None, max_chatgpt_active=2, team_context=None):
+def create_new_account(
+    chatgpt_api, mail_client, pending_invite_email: str | None = None, max_chatgpt_active=2, team_context=None
+):
     """只消费已有 pending invite：用对应 CF 邮箱完成注册，不再发送新 invite。"""
     import uuid
 
@@ -3118,7 +3236,12 @@ def create_new_account(chatgpt_api, mail_client, pending_invite_email: str | Non
             team_context=team_context,
             team_account_id=team_account_id,
         )
-        logger.info("[注册新号] 尝试消费 pending invite: %s (invite_id=%s, addressId=%s)", email, candidate.get("invite_id"), mail_account_id)
+        logger.info(
+            "[注册新号] 尝试消费 pending invite: %s (invite_id=%s, addressId=%s)",
+            email,
+            candidate.get("invite_id"),
+            mail_account_id,
+        )
 
         try:
             invite_link = _extract_pending_invite_link(mail_client, email)
@@ -3151,7 +3274,9 @@ def create_new_account(chatgpt_api, mail_client, pending_invite_email: str | Non
     return None
 
 
-def create_new_invited_account(chatgpt_api, mail_client, max_chatgpt_active=2, team_context=None, invite_domains: str | None = None):
+def create_new_invited_account(
+    chatgpt_api, mail_client, max_chatgpt_active=2, team_context=None, invite_domains: str | None = None
+):
     """创建一个新 CFMail 地址，发送 Team invite，再完成注册和 PAT 上传。"""
     import uuid
 
@@ -3208,9 +3333,7 @@ def create_new_invited_account(chatgpt_api, mail_client, max_chatgpt_active=2, t
             chatgpt_api.stop()
         return _complete_registration(email, password, invite_link, mail_client, team_context=team_context)
 
-    effective_invite_domains = str(
-        invite_domains or getattr(team_context, "invite_domains", "") or ""
-    ).strip()
+    effective_invite_domains = str(invite_domains or getattr(team_context, "invite_domains", "") or "").strip()
     mail_account_id, email, prefix = _create_random_cfmail_address(
         mail_client,
         invite_domains=effective_invite_domains or None,
@@ -3368,7 +3491,9 @@ def cmd_invite_add(
 
     _abort_if_cancel_requested()
     if not force_create_invite:
-        raise RuntimeError("新增 invite 会真实发送 Team invite；请使用 --force-create-invite 或 API force_create_invite=true 显式确认")
+        raise RuntimeError(
+            "新增 invite 会真实发送 Team invite；请使用 --force-create-invite 或 API force_create_invite=true 显式确认"
+        )
     active_limit = normalize_active_limit(max_chatgpt_active)
     chatgpt = ChatGPTTeamAPI()
     _start_chatgpt_for_team(chatgpt, team_context)
@@ -3464,7 +3589,11 @@ def cmd_clear_pending_invites(*, team_context=None, concurrency: int = 4) -> dic
             emails.append(email)
 
     if not emails:
-        logger.info("[pending invite 清理] Team=%s 扫描 %d 条，未发现 pending invite", _team_label(team_context), len(invites or []))
+        logger.info(
+            "[pending invite 清理] Team=%s 扫描 %d 条，未发现 pending invite",
+            _team_label(team_context),
+            len(invites or []),
+        )
         return {
             "mode": "clear_pending_invites",
             "team": _team_label(team_context),
@@ -3512,9 +3641,7 @@ def cmd_clear_pending_invites(*, team_context=None, concurrency: int = 4) -> dic
     failed = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
-            executor.submit(delete_batch, batch, index + 1): batch
-            for index, batch in enumerate(email_batches)
-            if batch
+            executor.submit(delete_batch, batch, index + 1): batch for index, batch in enumerate(email_batches) if batch
         }
         for future in as_completed(futures):
             _abort_if_cancel_requested()
@@ -3581,7 +3708,9 @@ def cmd_bulk_invite(
             if isinstance(data, dict):
                 raw_errors = data.get("errored_emails") if isinstance(data.get("errored_emails"), list) else []
                 errored = [
-                    _normalized_email(item.get("email") or item.get("email_address") if isinstance(item, dict) else item)
+                    _normalized_email(
+                        item.get("email") or item.get("email_address") if isinstance(item, dict) else item
+                    )
                     for item in raw_errors
                 ]
                 errored = [email for email in errored if email]
@@ -3596,8 +3725,7 @@ def cmd_bulk_invite(
     batch_results = []
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {
-            executor.submit(send_batch, batch, index + 1): (index + 1, batch)
-            for index, batch in enumerate(batches)
+            executor.submit(send_batch, batch, index + 1): (index + 1, batch) for index, batch in enumerate(batches)
         }
         for future in as_completed(futures):
             _abort_if_cancel_requested()
@@ -3615,15 +3743,12 @@ def cmd_bulk_invite(
     verified_after_error = []
     if failed:
         try:
+
             def _list_invites(chatgpt_api):
                 return chatgpt_api.list_invites()
 
             remote_invites = _run_team_invite_worker(team_context, _list_invites)
-            remote_pending = {
-                _invite_email(invite)
-                for invite in remote_invites or []
-                if _is_pending_invite(invite)
-            }
+            remote_pending = {_invite_email(invite) for invite in remote_invites or [] if _is_pending_invite(invite)}
             remaining_failed = []
             for item in failed:
                 email = _normalized_email(item.get("email"))
@@ -4192,20 +4317,42 @@ def main():
     rotate_p = sub.add_parser("rotate", help="兼容旧命令：实际执行 swap_seat，不移出、不邀请")
     rotate_p.add_argument("target", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）")
     swap_p = sub.add_parser("swap-seats", help="CPA 驱动 seat 切换（保留 1~5 个 ChatGPT/OAuth active，不 kick）")
-    swap_p.add_argument("max_chatgpt_active", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）")
+    swap_p.add_argument(
+        "max_chatgpt_active", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）"
+    )
     auto_replace_p = sub.add_parser("auto-detect-replace", help="先 swap_seat；若 GPT seat 低于目标，则按模式补位")
-    auto_replace_p.add_argument("max_chatgpt_active", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）")
+    auto_replace_p.add_argument(
+        "max_chatgpt_active", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）"
+    )
     auto_replace_p.add_argument("--email", help="指定要消费的 pending invite 邮箱")
-    auto_replace_p.add_argument("--replace-mode", choices=["pending_invite", "create_invite"], default="pending_invite", help="补位模式：消费已有 pending invite 或创建新 CFMail invite")
+    auto_replace_p.add_argument(
+        "--replace-mode",
+        choices=["pending_invite", "create_invite"],
+        default="pending_invite",
+        help="补位模式：消费已有 pending invite 或创建新 CFMail invite",
+    )
     multi_team_p = sub.add_parser("manage-teams", help="按 TEAM_WORKSPACES_JSON 逐个 Team 执行 quota 检查与必要替换")
-    multi_team_p.add_argument("max_chatgpt_active", type=int, nargs="?", default=2, help="默认 ChatGPT/OAuth active 保留数 1~5")
-    multi_team_p.add_argument("--no-replace", action="store_true", help="只执行 swap_seat，不在 GPT seat 低于目标时补位")
-    multi_team_p.add_argument("--replace-mode", choices=["pending_invite", "create_invite"], default="pending_invite", help="补位模式：消费已有 pending invite 或创建新 CFMail invite")
+    multi_team_p.add_argument(
+        "max_chatgpt_active", type=int, nargs="?", default=2, help="默认 ChatGPT/OAuth active 保留数 1~5"
+    )
+    multi_team_p.add_argument(
+        "--no-replace", action="store_true", help="只执行 swap_seat，不在 GPT seat 低于目标时补位"
+    )
+    multi_team_p.add_argument(
+        "--replace-mode",
+        choices=["pending_invite", "create_invite"],
+        default="pending_invite",
+        help="补位模式：消费已有 pending invite 或创建新 CFMail invite",
+    )
     add_p = sub.add_parser("add", help="消费已有 pending invite 注册新号（不会发送新 invite）")
     add_p.add_argument("--email", help="指定要消费的 pending invite 邮箱；不传则自动选择")
     invite_add_p = sub.add_parser("invite-add", help="创建随机 CFMail、发送新 Team invite 并注册上传 PAT")
-    invite_add_p.add_argument("max_chatgpt_active", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）")
-    invite_add_p.add_argument("--force-create-invite", action="store_true", help="确认真实创建并发送一个新的 Team invite")
+    invite_add_p.add_argument(
+        "max_chatgpt_active", type=int, nargs="?", default=2, help="ChatGPT/OAuth active 保留数 1~5（默认 2）"
+    )
+    invite_add_p.add_argument(
+        "--force-create-invite", action="store_true", help="确认真实创建并发送一个新的 Team invite"
+    )
     sub.add_parser("manual-add", help="已停用：OAuth/auth 由 CPA 管理")
     admin_login_p = sub.add_parser("admin-login", help="交互式完成管理员主号登录")
     admin_login_p.add_argument("--email", help="管理员邮箱；不传则运行时交互输入")
@@ -4256,7 +4403,9 @@ def main():
     elif args.command == "swap-seats":
         cmd_swap_seats(args.max_chatgpt_active)
     elif args.command == "auto-detect-replace":
-        cmd_auto_detect_replace(args.max_chatgpt_active, pending_invite_email=args.email, replace_mode=args.replace_mode)
+        cmd_auto_detect_replace(
+            args.max_chatgpt_active, pending_invite_email=args.email, replace_mode=args.replace_mode
+        )
     elif args.command == "manage-teams":
         cmd_manage_teams(
             args.max_chatgpt_active,
