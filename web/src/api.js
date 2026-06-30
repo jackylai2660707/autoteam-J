@@ -64,7 +64,11 @@ export const api = {
     max_chatgpt_active: Math.max(1, Math.min(5, Number(maxChatgptActive) || 2)),
     account_id: accountId,
   }),
-  startConsumePendingInvite: (email = '', accountId = '') => request('POST', '/tasks/add', { email, account_id: accountId }),
+  startConsumePendingInvite: (email = '', accountId = '', maxChatgptActive = null) => request('POST', '/tasks/add', {
+    email,
+    account_id: accountId,
+    ...(maxChatgptActive === null ? {} : { max_chatgpt_active: Math.max(1, Math.min(5, Number(maxChatgptActive) || 2)) }),
+  }),
   startInviteAdd: (accountId = '', maxChatgptActive = null, forceCreateInvite = false, inviteDomains = '') => request('POST', '/tasks/invite-add', {
     account_id: accountId,
     force_create_invite: !!forceCreateInvite,

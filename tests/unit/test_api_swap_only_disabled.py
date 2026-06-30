@@ -43,6 +43,25 @@ def test_post_add_starts_consume_pending_invite_task(monkeypatch):
     assert started[0][2] == (None, 3, None)
 
 
+def test_post_add_allows_manual_active_limit_override(monkeypatch):
+    monkeypatch.setattr(api, "_require_cpa_configs", lambda _label: None)
+    monkeypatch.setattr(api, "_require_mail_provider_configs", lambda _label, provider=None, env=None: None)
+    monkeypatch.setattr(api, "_auto_check_config", {"target_seats": 2})
+    started = []
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        started.append((command, params, args, kwargs))
+        return {"task_id": command}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    result = api.post_add(api.PendingInviteConsumeParams(email="pending@example.com", max_chatgpt_active=4))
+
+    assert result == {"task_id": "consume-pending-invite"}
+    assert started[0][1] == {"email": "pending@example.com", "account_id": "", "max_chatgpt_active": 4}
+    assert started[0][2] == ("pending@example.com", 4, None)
+
+
 def test_post_invite_add_requires_explicit_force(monkeypatch):
     monkeypatch.setattr(api, "_require_cpa_configs", lambda _label: None)
     monkeypatch.setattr(api, "_require_mail_provider_configs", lambda _label, provider=None, env=None: None)

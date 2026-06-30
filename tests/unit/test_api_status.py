@@ -624,6 +624,25 @@ def test_put_runtime_config_normalizes_cpa_management_page_url(monkeypatch):
     assert written["CPA_URL"] == "https://api.example.com"
 
 
+def test_put_runtime_config_normalizes_pending_invite_forward_map(monkeypatch):
+    written = {}
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: written.__setitem__(key, value))
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            API_KEY="old-key",
+            PENDING_INVITE_FORWARD_MAP='{"@icloud.com":"JackyLai@latte-fitness.com"}',
+        )
+    )
+
+    assert result["message"] == "配置保存成功"
+    assert written["PENDING_INVITE_FORWARD_MAP"] == "icloud.com=jackylai@latte-fitness.com"
+
+
 def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(monkeypatch):
     written = {}
 

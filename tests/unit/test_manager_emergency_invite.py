@@ -41,6 +41,8 @@ class _FakeCfMail:
     def _resolve_account_id_for_email(self, email):
         if email == "pending@example.com":
             return "addr-1"
+        if email == "jackylai@latte-fitness.com":
+            return "addr-forward"
         if email == "alex1234@rand.example.com":
             return "addr-new"
         return None
@@ -67,6 +69,21 @@ class _FakeCfMail:
         return "https://invite.example/abc"
 
 
+class _RecordingMail(_FakeCfMail):
+    def __init__(self):
+        super().__init__()
+        self.search_calls = []
+        self.wait_calls = []
+
+    def search_emails_by_recipient(self, to_email, size=10, account_id=None):
+        self.search_calls.append((to_email, size, account_id))
+        return [{"sendEmail": "noreply@openai.com", "subject": "Invite", "body": "invite"}]
+
+    def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
+        self.wait_calls.append((to_email, timeout, sender_keyword))
+        return {"sendEmail": "noreply@openai.com", "subject": "Invite", "body": "invite"}
+
+
 class _RetryCfMail(_FakeCfMail):
     def _resolve_account_id_for_email(self, email):
         if email == "retry@example.com":
@@ -77,6 +94,101 @@ class _RetryCfMail(_FakeCfMail):
         if to_email == "retry@example.com":
             return [{"sendEmail": "noreply@openai.com", "subject": "Invite", "body": "invite"}]
         return super().search_emails_by_recipient(to_email, size=size, account_id=account_id)
+
+
+def test_parse_pending_invite_forward_map_accepts_text_and_json(monkeypatch):
+    assert manager._parse_pending_invite_forward_map("icloud.com=jackylai@latte-fitness.com") == {
+        "icloud.com": "jackylai@latte-fitness.com"
+    }
+    assert manager._parse_pending_invite_forward_map('{"@icloud.com":"jackylai@latte-fitness.com"}') == {
+        "icloud.com": "jackylai@latte-fitness.com"
+    }
+    assert manager._parse_pending_invite_forward_map(
+        '[{"from":"sips.bonier.5d@icloud.com","to":"jackylai@latte-fitness.com"}]'
+    ) == {"sips.bonier.5d@icloud.com": "jackylai@latte-fitness.com"}
+
+    monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "*.icloud.com=>jackylai@latte-fitness.com")
+    assert manager._pending_invite_forward_to("artist.armadas_5n@icloud.com") == "jackylai@latte-fitness.com"
+
+
+def test_forwarded_recipient_mail_client_reads_from_delivery_mailbox(monkeypatch):
+    monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "icloud.com=jackylai@latte-fitness.com")
+    base = _RecordingMail()
+
+    wrapped = manager._with_pending_invite_forwarding(base)
+    emails = wrapped.search_emails_by_recipient("sips.bonier.5d@icloud.com", size=7)
+    email_item = wrapped.wait_for_email("sips.bonier.5d@icloud.com", timeout=12, sender_keyword="openai")
+
+    assert emails
+    assert email_item["subject"] == "Invite"
+    assert base.search_calls == [("jackylai@latte-fitness.com", 7, "addr-forward")]
+    assert base.wait_calls == [("jackylai@latte-fitness.com", 12, "openai")]
+
+
+def test_pending_invite_candidates_allow_mapped_non_cfmail_domain(monkeypatch):
+    fake_chatgpt = _FakeChatGPT()
+    fake_mail = _FakeCfMail()
+    invites = [{"id": "inv-icloud", "email_address": "user@icloud.com", "seat_type": "usage_based"}]
+
+    monkeypatch.setattr(manager, "_fetch_team_state_for_account", lambda _chatgpt, account_id=None: ([], invites))
+    monkeypatch.setattr(
+        manager,
+        "infer_mail_provider_from_email",
+        lambda email: "cloudmail" if str(email).endswith("@icloud.com") else "",
+    )
+
+    assert manager._pending_invite_candidates(fake_chatgpt, fake_mail) == []
+
+    monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "icloud.com=jackylai@latte-fitness.com")
+    candidates = manager._pending_invite_candidates(fake_chatgpt, fake_mail)
+
+    assert candidates == [
+        {
+            "email": "user@icloud.com",
+            "invite_id": "inv-icloud",
+            "role": "",
+            "seat_type": "usage_based",
+            "mail_forward_to": "jackylai@latte-fitness.com",
+        }
+    ]
+
+
+def test_ensure_local_pending_invite_account_uses_forwarded_mailbox_but_keeps_account_email(monkeypatch):
+    fake_mail = _FakeCfMail()
+    added = []
+    updates = []
+
+    monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "icloud.com=jackylai@latte-fitness.com")
+    monkeypatch.setattr(manager, "load_accounts", lambda: [])
+    monkeypatch.setattr(
+        manager,
+        "add_account",
+        lambda email, password, **kwargs: added.append((email, password, kwargs)),
+    )
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+
+    account_id = manager._ensure_local_pending_invite_account(
+        "sips.bonier.5d@icloud.com",
+        "new-password",
+        fake_mail,
+        team_account_id="acc-team",
+    )
+
+    assert account_id == "addr-forward"
+    assert added[0][0] == "sips.bonier.5d@icloud.com"
+    assert added[0][2]["mail_provider"] == "cloudflare_temp_email"
+    assert added[0][2]["mail_account_id"] == "addr-forward"
+    assert updates == [
+        (
+            "sips.bonier.5d@icloud.com",
+            {
+                "managed_by_autoteam": True,
+                "disabled": False,
+                "chatgpt_account_id": "acc-team",
+                "mail_forward_to": "jackylai@latte-fitness.com",
+            },
+        )
+    ]
 
 
 def test_cmd_add_consumes_pending_invite_and_activates_new_account(monkeypatch):

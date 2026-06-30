@@ -178,6 +178,152 @@ def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
+def _email_domain(value: str | None) -> str:
+    email = _normalized_email(value)
+    if "@" not in email:
+        return ""
+    return email.rsplit("@", 1)[-1]
+
+
+def _parse_pending_invite_forward_map(value: str | None = None) -> dict[str, str]:
+    """Parse pending invite mail forwarding rules.
+
+    Supported forms:
+    - {"icloud.com":"inbox@example.com"}
+    - [{"from":"icloud.com","to":"inbox@example.com"}]
+    - icloud.com=inbox@example.com; user@a.com=inbox@example.com
+    """
+    raw = str(value if value is not None else os.environ.get("PENDING_INVITE_FORWARD_MAP", "") or "").strip()
+    if not raw:
+        return {}
+
+    items = []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            items = list(parsed.items())
+        elif isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                source = item.get("from") or item.get("source") or item.get("domain") or item.get("email")
+                target = item.get("to") or item.get("target") or item.get("mailbox") or item.get("recipient")
+                items.append((source, target))
+    except Exception:
+        for part in re.split(r"[;\n,]+", raw):
+            text = part.strip()
+            if not text:
+                continue
+            if "=>" in text:
+                source, target = text.split("=>", 1)
+            elif "=" in text:
+                source, target = text.split("=", 1)
+            elif ":" in text:
+                source, target = text.split(":", 1)
+            else:
+                continue
+            items.append((source, target))
+
+    mapping = {}
+    for source, target in items:
+        source_key = str(source or "").strip().lower().lstrip("@")
+        target_email = _normalized_email(target)
+        if not source_key or "@" not in target_email:
+            continue
+        if source_key.startswith("*."):
+            source_key = source_key[2:]
+        mapping[source_key] = target_email
+    return mapping
+
+
+def _pending_invite_forward_to(email: str | None, acc: dict | None = None) -> str:
+    acc = acc or {}
+    explicit = _normalized_email(acc.get("mail_forward_to") or acc.get("forward_to") or acc.get("delivery_email"))
+    if explicit:
+        return explicit
+
+    target = _normalized_email(email)
+    if not target:
+        return ""
+    mapping = _parse_pending_invite_forward_map()
+    domain = _email_domain(target)
+    return mapping.get(target) or mapping.get(domain) or ""
+
+
+def _mail_delivery_email_for(email: str | None, acc: dict | None = None) -> str:
+    return _pending_invite_forward_to(email, acc=acc) or _normalized_email(email)
+
+
+class _ForwardedRecipientMailClient:
+    """Use a forwarding mailbox for reads while keeping the account email unchanged."""
+
+    def __init__(self, base_client, mapping: dict[str, str] | None = None):
+        self._base_client = base_client
+        self._mapping = mapping or _parse_pending_invite_forward_map()
+
+    def __getattr__(self, name):
+        return getattr(self._base_client, name)
+
+    @property
+    def provider_name(self):
+        return getattr(self._base_client, "provider_name", "")
+
+    @property
+    def service_id(self):
+        return getattr(self._base_client, "service_id", None)
+
+    def _forward_to(self, to_email, acc: dict | None = None):
+        target = _normalized_email(to_email)
+        explicit = _normalized_email((acc or {}).get("mail_forward_to") or (acc or {}).get("forward_to"))
+        if explicit:
+            return explicit
+        domain = _email_domain(target)
+        return self._mapping.get(target) or self._mapping.get(domain) or target
+
+    def _resolve_account_id_for_email(self, to_email):
+        mapped = self._forward_to(to_email)
+        resolver = getattr(self._base_client, "_resolve_account_id_for_email", None)
+        if callable(resolver):
+            return resolver(mapped)
+        return None
+
+    def search_emails_by_recipient(self, to_email, size=10, account_id=None):
+        mapped = self._forward_to(to_email)
+        mapped_account_id = account_id
+        if mapped != _normalized_email(to_email):
+            mapped_account_id = self._resolve_account_id_for_email(mapped)
+            logger.info("[邮件转发] %s 的邮件将从 %s 读取", _normalized_email(to_email), mapped)
+        try:
+            return self._base_client.search_emails_by_recipient(mapped, size=size, account_id=mapped_account_id)
+        except TypeError:
+            return self._base_client.search_emails_by_recipient(mapped, size=size)
+
+    def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
+        mapped = self._forward_to(to_email)
+        return self._base_client.wait_for_email(mapped, timeout=timeout, sender_keyword=sender_keyword)
+
+    def delete_emails_for(self, to_email):
+        mapped = self._forward_to(to_email)
+        deleter = getattr(self._base_client, "delete_emails_for", None)
+        if callable(deleter):
+            return deleter(mapped)
+        return 0
+
+
+def _with_pending_invite_forwarding(mail_client, acc: dict | None = None):
+    mapping = _parse_pending_invite_forward_map()
+    if acc:
+        account_email = _normalized_email(acc.get("email"))
+        forward_to = _pending_invite_forward_to(account_email, acc=acc)
+        if account_email and forward_to and forward_to != account_email:
+            mapping[account_email] = forward_to
+    if not mapping:
+        return mail_client
+    if isinstance(mail_client, _ForwardedRecipientMailClient):
+        return mail_client
+    return _ForwardedRecipientMailClient(mail_client, mapping=mapping)
+
+
 def _parse_email_list(value) -> tuple[list[str], list[str]]:
     if value is None:
         raw_parts = []
@@ -373,13 +519,13 @@ def _get_account_mail_client(acc: dict | None):
     )
     has_legacy_cloudmail_binding = acc.get("cloudmail_account_id") is not None
     if has_explicit_mail_binding or has_legacy_cloudmail_binding or infer_mail_service_from_email(acc.get("email")):
-        return get_mail_client_for_account(acc)
+        return _with_pending_invite_forwarding(get_mail_client_for_account(acc), acc=acc)
 
     services = get_mail_services()
     if len(services) == 1:
-        return get_mail_client(service=services[0])
+        return _with_pending_invite_forwarding(get_mail_client(service=services[0]), acc=acc)
     if not services:
-        return CloudMailClient()
+        return _with_pending_invite_forwarding(CloudMailClient(), acc=acc)
 
     email = _normalized_email(acc.get("email"))
     raise ValueError(
@@ -2510,18 +2656,19 @@ def _create_random_cfmail_address(mail_client, *, attempts=5, invite_domains: st
 
 
 def _ensure_local_pending_invite_account(email, password, mail_client, account_id=None, *, team_context=None, team_account_id=None):
-    """把 pending invite 对应的 CF 邮箱落到本地账号池，便于后续状态跟踪。"""
+    """把 pending invite 对应账号落到本地账号池，转发邮箱只作为收信通道。"""
     email = _normalized_email(email)
     if not email:
         return None
 
-    account_id = account_id if account_id is not None else _mail_account_id_for_email(mail_client, email)
-    team_account_id = str(team_account_id or _team_account_id(team_context) or "").strip()
-    provider = getattr(mail_client, "provider_name", "") or infer_mail_provider_from_email(email)
-    service_id = getattr(mail_client, "service_id", None) or infer_mail_service_from_email(email) or None
-
     accounts = load_accounts()
     acc = find_account(accounts, email)
+    delivery_email = _mail_delivery_email_for(email, acc=acc)
+    account_id = account_id if account_id is not None else _mail_account_id_for_email(mail_client, delivery_email)
+    team_account_id = str(team_account_id or _team_account_id(team_context) or "").strip()
+    provider = getattr(mail_client, "provider_name", "") or infer_mail_provider_from_email(email)
+    service_id = getattr(mail_client, "service_id", None) or infer_mail_service_from_email(delivery_email) or None
+
     if acc:
         updates = {
             "password": password,
@@ -2537,6 +2684,8 @@ def _ensure_local_pending_invite_account(email, password, mail_client, account_i
         if account_id is not None:
             updates["mail_account_id"] = account_id
             updates["cloudmail_account_id"] = None
+        if delivery_email and delivery_email != email:
+            updates["mail_forward_to"] = delivery_email
         update_account(email, **updates)
         return account_id
 
@@ -2551,6 +2700,8 @@ def _ensure_local_pending_invite_account(email, password, mail_client, account_i
     updates = {"managed_by_autoteam": True, "disabled": False}
     if team_account_id:
         updates["chatgpt_account_id"] = team_account_id
+    if delivery_email and delivery_email != email:
+        updates["mail_forward_to"] = delivery_email
     update_account(email, **updates)
     return account_id
 
@@ -2563,17 +2714,19 @@ def _pending_invite_candidates(chatgpt_api, mail_client, *, account_id: str | No
         email = _normalized_email(inv.get("email_address") or inv.get("email"))
         if not email or email in joined:
             continue
+        forward_to = _pending_invite_forward_to(email)
         provider = infer_mail_provider_from_email(email) or getattr(mail_client, "provider_name", "")
-        if provider and provider != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
+        if provider and provider != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL and not forward_to:
             continue
-        candidates.append(
-            {
-                "email": email,
-                "invite_id": str(inv.get("id") or "").strip(),
-                "role": inv.get("role", ""),
-                "seat_type": inv.get("seat_type", ""),
-            }
-        )
+        candidate = {
+            "email": email,
+            "invite_id": str(inv.get("id") or "").strip(),
+            "role": inv.get("role", ""),
+            "seat_type": inv.get("seat_type", ""),
+        }
+        if forward_to and forward_to != email:
+            candidate["mail_forward_to"] = forward_to
+        candidates.append(candidate)
     return candidates
 
 
@@ -2931,6 +3084,7 @@ def create_new_account(chatgpt_api, mail_client, pending_invite_email: str | Non
 
     if getattr(mail_client, "provider_name", "") != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         raise RuntimeError("注册新号只允许使用 Cloudflare Temp Email")
+    mail_client = _with_pending_invite_forwarding(mail_client)
 
     _, team_account_id, precheck = _pre_sweep_registration_team(
         chatgpt_api,
@@ -3003,6 +3157,7 @@ def create_new_invited_account(chatgpt_api, mail_client, max_chatgpt_active=2, t
 
     if getattr(mail_client, "provider_name", "") != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         raise RuntimeError("新增 invite 注册只允许使用 Cloudflare Temp Email")
+    mail_client = _with_pending_invite_forwarding(mail_client)
 
     _, team_account_id, precheck = _pre_sweep_registration_team(
         chatgpt_api,
@@ -3148,6 +3303,7 @@ def cmd_add(pending_invite_email: str | None = None, max_chatgpt_active=2, team_
         if getattr(mail_client, "provider_name", "") != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
             raise RuntimeError("注册新号只允许使用 Cloudflare Temp Email")
         mail_client.login()
+        mail_client = _with_pending_invite_forwarding(mail_client)
 
         result_email = create_new_account(
             chatgpt,
@@ -3222,6 +3378,7 @@ def cmd_invite_add(
         if getattr(mail_client, "provider_name", "") != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
             raise RuntimeError("新增 invite 注册只允许使用 Cloudflare Temp Email")
         mail_client.login()
+        mail_client = _with_pending_invite_forwarding(mail_client)
 
         result_email = create_new_invited_account(
             chatgpt,

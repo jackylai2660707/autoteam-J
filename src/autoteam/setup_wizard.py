@@ -45,6 +45,12 @@ REQUIRED_CONFIGS = [
         "",
         True,
     ),
+    (
+        "PENDING_INVITE_FORWARD_MAP",
+        "pending invite 转发映射（如 icloud.com=jackylai@latte-fitness.com）",
+        "",
+        True,
+    ),
     ("SYNC_TARGET_CPA", "启用 CPA 同步（true/false）", "", True),
     ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", True),
     ("CPA_KEY", "CPA 管理密钥", "", True),

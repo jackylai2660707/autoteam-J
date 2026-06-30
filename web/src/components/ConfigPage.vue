@@ -226,6 +226,34 @@
           </div>
         </div>
 
+        <div
+          v-if="fieldByKey('PENDING_INVITE_FORWARD_MAP')"
+          class="rounded-2xl border border-cyan-400/15 bg-cyan-500/8 p-5"
+        >
+          <div class="mb-3 flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="text-sm font-medium text-white">Pending invite 转发映射</div>
+              <div class="mt-1 text-xs leading-5 text-slate-400">
+                用于 iCloud 这类已有 pending invite：Team 账号邮箱保持 iCloud，但邀请邮件和验证码从转发后的 CFMail 收件箱读取。
+              </div>
+            </div>
+            <span class="status-badge border-cyan-400/20 bg-cyan-500/10 text-[11px] text-cyan-200">
+              可选
+            </span>
+          </div>
+          <textarea
+            v-model="runtimeForm.PENDING_INVITE_FORWARD_MAP"
+            rows="3"
+            :placeholder="runtimeFieldPlaceholder(fieldByKey('PENDING_INVITE_FORWARD_MAP'))"
+            class="input-dark min-h-[96px] font-mono text-xs"
+          ></textarea>
+          <div class="mt-2 text-[11px] leading-5 text-slate-500">
+            每行或用分号分隔一条规则：来源域名或来源邮箱 = 实际收件箱。例如
+            <span class="font-mono text-cyan-200">icloud.com=jackylai@latte-fitness.com</span>。
+            也支持 JSON：<span class="font-mono text-cyan-200">{"icloud.com":"jackylai@latte-fitness.com"}</span>。
+          </div>
+        </div>
+
         <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
           <p class="text-xs leading-6 text-slate-400">
             保存后会立即热加载。消费 pending invite 时会按邮箱域名匹配对应 CFMail 服务；无法匹配时使用默认服务。
@@ -669,7 +697,7 @@ defineProps({
 const emit = defineEmits(['refresh', 'admin-progress'])
 
 const runtimeCategoryKeys = {
-  cloudmail: ['MAIL_PROVIDER', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
+  cloudmail: ['MAIL_PROVIDER', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN', 'PENDING_INVITE_FORWARD_MAP'],
   cpa: [
     'SYNC_TARGET_CPA',
     'SYNC_TARGET_SUB2API',
@@ -792,6 +820,7 @@ const runtimeFieldHints = {
   PLAYWRIGHT_PROXY_BYPASS: '代理绕过列表，逗号分隔，例如 localhost,127.0.0.1,*.local；本地回调通常要绕过。',
   API_KEY: 'WebUI 和 API 的访问密钥。留空保存会自动生成；修改后当前浏览器会自动更新登录密钥。',
   SWAP_SEAT_WHITELIST_EMAILS: '白名单成员不会查 quota、不会切 seat、不会启停 CPA OAuth；支持逗号、分号、空格或换行分隔。',
+  PENDING_INVITE_FORWARD_MAP: '已有 pending invite 的邮箱如果统一转发到 CFMail 收件箱，在这里声明映射。账号仍用原邮箱加入 Team，只是收信改读转发地址。',
 }
 
 const runtimeFieldPlaceholders = {
@@ -811,6 +840,7 @@ const runtimeFieldPlaceholders = {
   PLAYWRIGHT_PROXY_BYPASS: '例如：localhost,127.0.0.1',
   API_KEY: '留空自动生成，或填自定义强随机密钥',
   SWAP_SEAT_WHITELIST_EMAILS: '例如：owner@example.com; admin@example.com',
+  PENDING_INVITE_FORWARD_MAP: '例如：icloud.com=jackylai@latte-fitness.com',
 }
 
 const mailServiceFieldMeta = {

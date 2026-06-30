@@ -90,6 +90,7 @@ class SetupConfig(BaseModel):
     CF_TEMP_EMAIL_BASE_URL: str = ""
     CF_TEMP_EMAIL_ADMIN_PASSWORD: str = ""
     CF_TEMP_EMAIL_DOMAIN: str = ""
+    PENDING_INVITE_FORWARD_MAP: str = ""
     SYNC_TARGET_CPA: str | bool = ""
     CPA_URL: str = "http://127.0.0.1:8317"
     CPA_KEY: str = ""
@@ -145,6 +146,7 @@ _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
     "CF_TEMP_EMAIL_BASE_URL",
     "CF_TEMP_EMAIL_ADMIN_PASSWORD",
     "CF_TEMP_EMAIL_DOMAIN",
+    "PENDING_INVITE_FORWARD_MAP",
     "SUB2API_GROUP",
     "SUB2API_PROXY",
     "SUB2API_MODEL_WHITELIST",
@@ -178,6 +180,7 @@ _ALL_RUNTIME_ENV_KEYS = [
     "CF_TEMP_EMAIL_BASE_URL",
     "CF_TEMP_EMAIL_ADMIN_PASSWORD",
     "CF_TEMP_EMAIL_DOMAIN",
+    "PENDING_INVITE_FORWARD_MAP",
     "CHATGPT_ACCOUNT_ID",
     "SYNC_TARGET_CPA",
     "CPA_URL",
@@ -630,6 +633,68 @@ def _parse_bool_text(value: object, *, default: bool | None = None) -> bool | No
     raise ValueError(f"无效布尔值: {value}")
 
 
+def _normalize_pending_invite_forward_map(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    items: list[tuple[object, object]] = []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        items = list(parsed.items())
+    elif isinstance(parsed, list):
+        for index, item in enumerate(parsed, 1):
+            if not isinstance(item, dict):
+                raise ValueError(f"PENDING_INVITE_FORWARD_MAP 第 {index} 项必须是对象")
+            source = item.get("from") or item.get("source") or item.get("domain") or item.get("email")
+            target = item.get("to") or item.get("target") or item.get("mailbox") or item.get("recipient")
+            items.append((source, target))
+    else:
+        for part in re.split(r"[;\n,]+", raw):
+            text = part.strip()
+            if not text:
+                continue
+            if "=>" in text:
+                source, target = text.split("=>", 1)
+            elif "=" in text:
+                source, target = text.split("=", 1)
+            elif ":" in text:
+                source, target = text.split(":", 1)
+            else:
+                raise ValueError("PENDING_INVITE_FORWARD_MAP 请使用 icloud.com=收件邮箱@example.com 的格式")
+            items.append((source, target))
+
+    email_pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    domain_pattern = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for index, (source, target) in enumerate(items, 1):
+        source_key = str(source or "").strip().lower().lstrip("@")
+        if source_key.startswith("*."):
+            source_key = source_key[2:]
+        target_email = str(target or "").strip().lower()
+        if not source_key:
+            raise ValueError(f"PENDING_INVITE_FORWARD_MAP 第 {index} 项缺少来源域名或邮箱")
+        if "@" in source_key:
+            if not email_pattern.match(source_key):
+                raise ValueError(f"PENDING_INVITE_FORWARD_MAP 第 {index} 项来源邮箱无效: {source_key}")
+        elif not domain_pattern.match(source_key):
+            raise ValueError(f"PENDING_INVITE_FORWARD_MAP 第 {index} 项来源域名无效: {source_key}")
+        if not email_pattern.match(target_email):
+            raise ValueError(f"PENDING_INVITE_FORWARD_MAP 第 {index} 项收件邮箱无效: {target_email or '<empty>'}")
+        if source_key in seen:
+            continue
+        seen.add(source_key)
+        normalized.append(f"{source_key}={target_email}")
+    if not normalized:
+        raise ValueError("PENDING_INVITE_FORWARD_MAP 没有可用映射，请填写 icloud.com=收件邮箱@example.com")
+    return ";".join(normalized)
+
+
 def _validate_runtime_optional_values(values: dict[str, str]):
     from autoteam.cpa_config import normalize_cpa_url
 
@@ -637,6 +702,10 @@ def _validate_runtime_optional_values(values: dict[str, str]):
 
     if "CPA_URL" in normalized:
         normalized["CPA_URL"] = normalize_cpa_url(normalized.get("CPA_URL", ""))
+    if "PENDING_INVITE_FORWARD_MAP" in normalized:
+        normalized["PENDING_INVITE_FORWARD_MAP"] = _normalize_pending_invite_forward_map(
+            normalized.get("PENDING_INVITE_FORWARD_MAP", "")
+        )
 
     def _normalize_positive_int(key: str):
         raw = str(normalized.get(key, "") or "").strip()
@@ -1529,6 +1598,7 @@ class PendingInviteConsumeParams(BaseModel):
     email: str | None = None
     account_id: str | None = None
     replace_mode: str | None = None
+    max_chatgpt_active: int | None = None
 
 
 class InviteAddParams(BaseModel):
@@ -2854,10 +2924,19 @@ def post_add(params: PendingInviteConsumeParams = PendingInviteConsumeParams()):
     _require_mail_provider_configs("注册新号", provider=MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL)
 
     default_limit = _normalize_swap_active_limit(_auto_check_config.get("target_seats", 2))
-    team_context = get_team_context(params.account_id, default_max_chatgpt_active=default_limit) if params.account_id else None
+    requested_limit = (
+        _normalize_swap_active_limit(params.max_chatgpt_active)
+        if params.max_chatgpt_active is not None
+        else default_limit
+    )
+    team_context = get_team_context(params.account_id, default_max_chatgpt_active=requested_limit) if params.account_id else None
     if params.account_id and not team_context:
         raise HTTPException(status_code=404, detail=f"未找到 Team 配置: {params.account_id}")
-    active_limit = _team_active_limit_or_default(team_context, default_limit)
+    active_limit = (
+        requested_limit
+        if params.max_chatgpt_active is not None
+        else _team_active_limit_or_default(team_context, default_limit)
+    )
     task = _start_task(
         "consume-pending-invite",
         cmd_add,

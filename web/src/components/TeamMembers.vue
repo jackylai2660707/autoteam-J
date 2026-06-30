@@ -57,6 +57,16 @@
         <span v-if="selectedTeam.pending_invite_email" class="rounded bg-amber-500/10 px-2 py-0.5 text-amber-200">
           指定 pending {{ selectedTeam.pending_invite_email }}
         </span>
+        <label class="flex items-center gap-2 rounded bg-gray-900/70 px-2 py-0.5">
+          <span>消费 invite 目标 active</span>
+          <input
+            v-model.number="consumeTargetActive"
+            type="number"
+            min="1"
+            max="5"
+            class="w-14 rounded border border-gray-700 bg-gray-950 px-2 py-0.5 text-xs text-white focus:border-blue-500 focus:outline-none"
+          />
+        </label>
       </div>
       <div
         v-if="currentTeamDisabled"
@@ -192,6 +202,7 @@ const runtimeStatus = ref(null)
 const cpaAuths = ref([])
 const cpaFilesSummary = ref({})
 const teamSelectorReady = ref(false)
+const consumeTargetActive = ref(2)
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const enabledTeams = computed(() => teams.value.filter(team => team.enabled !== false))
 const selectedTeam = computed(() => teams.value.find(team => team.account_id === selectedAccountId.value) || enabledTeams.value[0] || teams.value[0] || null)
@@ -212,6 +223,7 @@ const memberOAuthSummary = computed(() => {
   }
 })
 const cpaProtectedUnmanaged = computed(() => Number(cpaFilesSummary.value?.protected_unmanaged || 0))
+const normalizedConsumeTargetActive = computed(() => Math.max(1, Math.min(5, Number(consumeTargetActive.value) || 2)))
 
 const CACHE_PREFIX = 'autoteam_team_members'
 
@@ -319,6 +331,10 @@ function formatTs(ts) {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+function syncConsumeTargetActive() {
+  consumeTargetActive.value = Math.max(1, Math.min(5, Number(selectedTeam.value?.max_chatgpt_active) || 2))
+}
+
 async function fetchMembers() {
   loading.value = true
   error.value = ''
@@ -371,8 +387,8 @@ async function consumePendingInvite(email) {
   error.value = ''
   message.value = ''
   try {
-    const result = await api.startConsumePendingInvite(email, selectedAccountId.value)
-    message.value = `已提交 pending invite 替换任务: ${result.task_id}`
+    const result = await api.startConsumePendingInvite(email, selectedAccountId.value, normalizedConsumeTargetActive.value)
+    message.value = `已提交 pending invite 替换任务: ${result.task_id}（目标 active ${normalizedConsumeTargetActive.value}）`
     messageClass.value = 'bg-blue-500/10 text-blue-300 border-blue-500/20'
     emit('task-started')
   } catch (e) {
@@ -385,6 +401,7 @@ async function consumePendingInvite(email) {
 
 watch(selectedAccountId, () => {
   if (!teamSelectorReady.value) return
+  syncConsumeTargetActive()
   data.value = null
   const cached = loadCache()
   if (cached) {
@@ -396,6 +413,7 @@ watch(selectedAccountId, () => {
 
 onMounted(async () => {
   await loadTeams()
+  syncConsumeTargetActive()
   teamSelectorReady.value = true
   const cached = loadCache()
   if (cached) {
