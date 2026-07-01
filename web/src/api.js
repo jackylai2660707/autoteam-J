@@ -118,5 +118,11 @@ export const api = {
     const query = params.toString()
     return request('GET', `/team/members${query ? `?${query}` : ''}`)
   },
+  getTeamInviteCount: (accountId = '') => {
+    const params = new URLSearchParams()
+    if (accountId) params.set('account_id', accountId)
+    const query = params.toString()
+    return request('GET', `/team/invites/count${query ? `?${query}` : ''}`)
+  },
   getLogs: (limit = 100, since = 0) => request('GET', `/logs?limit=${limit}&since=${since}`),
 }

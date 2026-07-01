@@ -2635,6 +2635,57 @@ def get_team_members(
         _release_playwright_lock("team-members")
 
 
+@app.get("/api/team/invites/count")
+def get_team_invite_count(account_id: str | None = None):
+    """轻量获取 Team pending invite 总数；不加载 invite 详情。"""
+    from autoteam.admin_state import get_admin_session_token, get_chatgpt_account_id
+    from autoteam.team_context import get_team_context
+
+    active_limit = _normalize_swap_active_limit(_auto_check_config.get("target_seats", 2))
+    team_context = get_team_context(account_id, default_max_chatgpt_active=active_limit)
+    if account_id and not team_context:
+        raise HTTPException(status_code=404, detail=f"未找到 Team 配置: {account_id}")
+    session_present = bool(getattr(team_context, "session_token", "") if team_context else get_admin_session_token())
+    resolved_account_id = str(getattr(team_context, "account_id", "") if team_context else get_chatgpt_account_id()).strip()
+
+    if not session_present or not resolved_account_id:
+        raise HTTPException(status_code=400, detail="请先完成管理员登录")
+
+    if not _acquire_playwright_lock("team-invite-count", blocking=False):
+        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再查询"))
+
+    try:
+
+        def _fetch_invite_count():
+            from autoteam.account_ops import fetch_team_invite_count
+
+            def _collect(chatgpt):
+                try:
+                    invite_count = fetch_team_invite_count(chatgpt, account_id=resolved_account_id)
+                except TypeError:
+                    invite_count = fetch_team_invite_count(chatgpt)
+                return {
+                    "invites": invite_count,
+                    "invites_counted": True,
+                    "team": team_context.public_dict() if team_context else {"account_id": resolved_account_id},
+                }
+
+            try:
+                return _run_with_chatgpt_session(_collect, team_context=team_context)
+            except TypeError:
+                return _run_with_chatgpt_session(_collect)
+
+        try:
+            return _pw_executor.run(_fetch_invite_count)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("[API] 获取 Team pending invite 数量失败")
+            raise HTTPException(status_code=502, detail=str(exc))
+    finally:
+        _release_playwright_lock("team-invite-count")
+
+
 @app.post("/api/team/members/remove")
 def post_team_member_remove(params: TeamMemberRemoveParams):
     """swap_seat-only：禁止移出 Team 成员，也禁止取消邀请。"""

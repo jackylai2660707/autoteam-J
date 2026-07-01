@@ -40,6 +40,7 @@
         <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">
           待接受邀请:
           <span v-if="data.invites_counted" class="text-yellow-400 font-medium">{{ data.invites }}</span>
+          <span v-else-if="inviteCountLoading" class="text-amber-300">刷新中...</span>
           <span v-else class="text-gray-500">未加载</span>
           <span v-if="data.invites_included" class="ml-1 text-gray-500">已载入 {{ data.invites_loaded || 0 }}</span>
         </span>
@@ -56,8 +57,11 @@
         v-if="!data.invites_counted || data.invites > 0"
         class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
       >
-        <span v-if="!data.invites_counted">
-          为了避免大量 pending invite 拖慢页面，当前只加载成员；可以单独刷新 pending 数量，或按需载入少量详情。
+        <span v-if="!data.invites_counted && inviteCountLoading">
+          正在后台只读取 pending invite 总数；不会拉取 800+ 条详情，成员表可以先正常使用。
+        </span>
+        <span v-else-if="!data.invites_counted">
+          为了避免大量 pending invite 拖慢页面，当前只加载成员；总数会自动后台刷新，也可以手动重试。
         </span>
         <span v-else-if="!data.invites_included">
           已检测到 {{ data.invites }} 个 pending invite。为避免 800+ invite 拖慢页面，默认只加载成员；需要逐个操作时再按需载入。
@@ -69,15 +73,15 @@
           pending invite 已载入，可在表格中选择单个 invite 消费。
         </span>
         <button
-          v-if="!data.invites_counted"
+          v-if="!data.invites_included"
           @click="loadPendingInviteCount"
-          :disabled="loading"
+          :disabled="inviteCountLoading"
           class="rounded-lg border border-gray-600 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition hover:bg-gray-700 disabled:opacity-50"
         >
-          {{ loading ? '刷新中...' : '刷新 pending 数量' }}
+          {{ inviteCountLoading ? '刷新中...' : data.invites_counted ? '重新刷新数量' : '刷新 pending 数量' }}
         </button>
         <button
-          v-else-if="!data.invites_included && data.invites > 0"
+          v-if="data.invites_counted && !data.invites_included && data.invites > 0"
           @click="loadPendingInvites"
           :disabled="loading"
           class="rounded-lg border border-amber-500/40 bg-amber-600/20 px-3 py-1 text-xs font-medium text-amber-100 transition hover:bg-amber-600/30 disabled:opacity-50"
@@ -240,6 +244,8 @@ const data = ref(null)
 const teams = ref([])
 const selectedAccountId = ref('')
 const loading = ref(false)
+const inviteCountLoading = ref(false)
+const inviteCountRequestId = ref(0)
 const error = ref('')
 const message = ref('')
 const messageClass = ref('')
@@ -309,6 +315,17 @@ function slimMemberPayload(payload) {
     invites_truncated: false,
     invites_counted: !!payload.invites_counted,
   }
+}
+
+function applyInviteCount(payload) {
+  if (!data.value) return
+  data.value = {
+    ...data.value,
+    invites: Number(payload?.invites ?? 0),
+    invites_counted: true,
+    invite_count_error: '',
+  }
+  saveCache(data.value)
 }
 
 function memberKey(member) {
@@ -398,8 +415,10 @@ function syncConsumeTargetActive() {
 async function fetchMembers(options = {}) {
   const includeInvites = !!options.includeInvites
   const includeInviteCount = options.includeInviteCount ?? includeInvites
+  const shouldRefreshInviteCount = options.refreshInviteCount ?? (!includeInvites && !includeInviteCount)
   loading.value = true
   error.value = ''
+  let refreshInviteCountAfterLoad = false
   try {
     const [membersResult, runtimeResult, cpaResult] = await Promise.all([
       api.getTeamMembers(selectedAccountId.value, {
@@ -415,10 +434,14 @@ async function fetchMembers(options = {}) {
     cpaAuths.value = Array.isArray(cpaResult) ? cpaResult : Array.isArray(cpaResult?.files) ? cpaResult.files : []
     cpaFilesSummary.value = cpaResult?.summary || {}
     if (!includeInvites) saveCache(data.value)
+    refreshInviteCountAfterLoad = shouldRefreshInviteCount
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
+  }
+  if (refreshInviteCountAfterLoad) {
+    loadPendingInviteCount({ silent: true })
   }
 }
 
@@ -426,8 +449,30 @@ async function loadPendingInvites() {
   await fetchMembers({ includeInvites: true, includeInviteCount: true })
 }
 
-async function loadPendingInviteCount() {
-  await fetchMembers({ includeInvites: false, includeInviteCount: true })
+async function loadPendingInviteCount(options = {}) {
+  if (!data.value || inviteCountLoading.value) return
+  const accountId = selectedAccountId.value
+  const requestId = inviteCountRequestId.value + 1
+  inviteCountRequestId.value = requestId
+  const silent = !!options.silent
+  inviteCountLoading.value = true
+  if (!silent) error.value = ''
+  try {
+    const result = await api.getTeamInviteCount(accountId)
+    if (requestId !== inviteCountRequestId.value || accountId !== selectedAccountId.value) return
+    applyInviteCount(result)
+  } catch (e) {
+    if (requestId !== inviteCountRequestId.value || accountId !== selectedAccountId.value) return
+    if (!silent) {
+      error.value = e.message
+    } else if (data.value) {
+      data.value = { ...data.value, invite_count_error: e.message }
+    }
+  } finally {
+    if (requestId === inviteCountRequestId.value) {
+      inviteCountLoading.value = false
+    }
+  }
 }
 
 async function hidePendingInvites() {
@@ -480,10 +525,13 @@ async function consumePendingInvite(email) {
 watch(selectedAccountId, () => {
   if (!teamSelectorReady.value) return
   syncConsumeTargetActive()
+  inviteCountRequestId.value += 1
+  inviteCountLoading.value = false
   data.value = null
   const cached = loadCache()
   if (cached) {
     data.value = cached
+    loadPendingInviteCount({ silent: true })
   } else {
     fetchMembers()
   }
@@ -496,6 +544,7 @@ onMounted(async () => {
   const cached = loadCache()
   if (cached) {
     data.value = cached
+    loadPendingInviteCount({ silent: true })
   } else {
     await fetchMembers()
   }

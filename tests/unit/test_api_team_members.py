@@ -155,6 +155,32 @@ def test_get_team_members_marks_managed_cpa_auth_email_as_local(monkeypatch):
     assert by_email["external@example.com"]["is_local"] is False
 
 
+def test_get_team_invite_count_reads_count_without_member_or_invite_details(monkeypatch):
+    _setup_team_member_api(monkeypatch)
+    count_calls = []
+
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback(object()))
+    monkeypatch.setattr("autoteam.team_context.get_team_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_invite_count",
+        lambda _chatgpt, account_id=None: count_calls.append(account_id) or 808,
+    )
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_members",
+        lambda *_args, **_kwargs: pytest.fail("count endpoint must not load Team members"),
+    )
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_invites",
+        lambda *_args, **_kwargs: pytest.fail("count endpoint must not load invite details"),
+    )
+
+    result = api.get_team_invite_count()
+
+    assert result["invites"] == 808
+    assert result["invites_counted"] is True
+    assert count_calls == ["acc-1"]
+
+
 def test_post_team_member_remove_rejects_member_and_invite_removal(monkeypatch):
     _setup_team_member_api(monkeypatch)
 
