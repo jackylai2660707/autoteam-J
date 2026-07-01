@@ -78,16 +78,24 @@ def _int_value(value, default=0):
         return default
 
 
-def _fetch_paginated_collection(chatgpt_api, base_path, label, *keys, limit=25):
+def _fetch_collection_page(chatgpt_api, base_path, label, *keys, offset=0, limit=25):
+    limit = max(1, int(limit or 25))
+    offset = max(0, int(offset or 0))
+    path = f"{base_path}?offset={offset}&limit={limit}&query="
+    resp = chatgpt_api._api_fetch("GET", path)
+    data = _parse_team_api_json(resp, label)
+    return _extract_collection(data, *keys), data
+
+
+def _fetch_paginated_collection(chatgpt_api, base_path, label, *keys, limit=25, max_items=None):
     items = []
     offset = 0
     limit = max(1, int(limit or 25))
     while True:
-        path = f"{base_path}?offset={offset}&limit={limit}&query="
-        resp = chatgpt_api._api_fetch("GET", path)
-        data = _parse_team_api_json(resp, label)
-        page_items = _extract_collection(data, *keys)
+        page_items, data = _fetch_collection_page(chatgpt_api, base_path, label, *keys, offset=offset, limit=limit)
         items.extend(page_items)
+        if max_items is not None and len(items) >= int(max_items):
+            return items[: int(max_items)]
 
         if not isinstance(data, dict):
             break
@@ -114,7 +122,7 @@ def fetch_team_members(chatgpt_api, account_id=None):
     )
 
 
-def fetch_team_invites(chatgpt_api, account_id=None):
+def fetch_team_invites(chatgpt_api, account_id=None, *, max_items=None):
     """只读 Team pending invite 列表。"""
     account_id = _resolve_account_id(chatgpt_api, account_id)
     return _fetch_paginated_collection(
@@ -124,7 +132,25 @@ def fetch_team_invites(chatgpt_api, account_id=None):
         "items",
         "invites",
         "account_invites",
+        max_items=max_items,
     )
+
+
+def fetch_team_invite_count(chatgpt_api, account_id=None):
+    """轻量读取 pending invite 数量；只请求第一页，避免为计数拉全量 invite。"""
+    account_id = _resolve_account_id(chatgpt_api, account_id)
+    page_items, data = _fetch_collection_page(
+        chatgpt_api,
+        f"/backend-api/accounts/{account_id}/invites",
+        "Team 邀请",
+        "items",
+        "invites",
+        "account_invites",
+        limit=1,
+    )
+    if isinstance(data, dict) and data.get("total") is not None:
+        return _int_value(data.get("total"), len(page_items))
+    return len(page_items)
 
 
 def fetch_team_state(chatgpt_api, account_id=None):

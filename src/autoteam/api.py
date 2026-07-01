@@ -2491,7 +2491,12 @@ def post_sync_accounts():
 
 
 @app.get("/api/team/members")
-def get_team_members(account_id: str | None = None):
+def get_team_members(
+    account_id: str | None = None,
+    include_invites: bool = False,
+    include_invite_count: bool = False,
+    invite_limit: int = 100,
+):
     """获取 Team 全部成员（包括手动添加的外部成员）"""
     from autoteam.admin_state import get_admin_session_token, get_chatgpt_account_id
     from autoteam.team_context import get_team_context
@@ -2512,14 +2517,42 @@ def get_team_members(account_id: str | None = None):
     try:
 
         def _fetch_team_members():
-            from autoteam.account_ops import fetch_team_state
+            from autoteam.account_ops import fetch_team_invite_count, fetch_team_invites, fetch_team_members
             from autoteam.accounts import load_accounts
 
             def _collect(chatgpt):
+                safe_invite_limit = max(1, min(500, int(invite_limit or 100)))
                 try:
-                    members, invites = fetch_team_state(chatgpt, account_id=resolved_account_id)
+                    members = fetch_team_members(chatgpt, account_id=resolved_account_id)
                 except TypeError:
-                    members, invites = fetch_team_state(chatgpt)
+                    members = fetch_team_members(chatgpt)
+
+                invite_count = None
+                invite_count_error = ""
+                invites = []
+                if include_invite_count or include_invites:
+                    try:
+                        invite_count = fetch_team_invite_count(chatgpt, account_id=resolved_account_id)
+                    except TypeError:
+                        invite_count = fetch_team_invite_count(chatgpt)
+                    except Exception as exc:
+                        invite_count_error = str(exc)
+                        logger.warning("[API] 读取 Team pending invite 数量失败，成员列表继续返回: %s", exc)
+
+                if include_invites:
+                    try:
+                        invites = fetch_team_invites(
+                            chatgpt,
+                            account_id=resolved_account_id,
+                            max_items=safe_invite_limit,
+                        )
+                    except TypeError:
+                        invites = fetch_team_invites(chatgpt)
+                        if len(invites) > safe_invite_limit:
+                            invites = invites[:safe_invite_limit]
+                    if invite_count is None and not invite_count_error:
+                        invite_count = len(invites)
+
                 local_emails = {a["email"].lower() for a in load_accounts()}
                 managed_emails = set(local_emails)
                 try:
@@ -2574,7 +2607,15 @@ def get_team_members(account_id: str | None = None):
                 return {
                     "members": result,
                     "total": len(members),
-                    "invites": len(invites),
+                    "invites": invite_count,
+                    "invites_counted": invite_count is not None,
+                    "invites_loaded": len(invites),
+                    "invites_included": bool(include_invites),
+                    "invites_truncated": bool(
+                        include_invites and invite_count is not None and len(invites) < invite_count
+                    ),
+                    "invite_limit": safe_invite_limit,
+                    "invite_count_error": invite_count_error,
                     "team": team_context.public_dict() if team_context else {"account_id": resolved_account_id},
                 }
 

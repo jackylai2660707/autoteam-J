@@ -17,33 +17,38 @@ def test_get_team_members_includes_seat_type_fields(monkeypatch):
 
     monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback(object()))
     monkeypatch.setattr(
-        "autoteam.account_ops.fetch_team_state",
-        lambda _chatgpt: (
-            [
-                {
-                    "email": "member@example.com",
-                    "role": "standard-user",
-                    "id": "user-1",
-                    "seat_type": "default",
-                }
-            ],
-            [
-                {
-                    "email_address": "invite@example.com",
-                    "role": "standard-user",
-                    "id": "invite-1",
-                    "seat_type": "usage_based",
-                }
-            ],
-        ),
+        "autoteam.account_ops.fetch_team_members",
+        lambda _chatgpt, account_id=None: [
+            {
+                "email": "member@example.com",
+                "role": "standard-user",
+                "id": "user-1",
+                "seat_type": "default",
+            }
+        ],
+    )
+    monkeypatch.setattr("autoteam.account_ops.fetch_team_invite_count", lambda _chatgpt, account_id=None: 123)
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_invites",
+        lambda _chatgpt, account_id=None, max_items=None: [
+            {
+                "email_address": "invite@example.com",
+                "role": "standard-user",
+                "id": "invite-1",
+                "seat_type": "usage_based",
+            }
+        ],
     )
     monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [{"email": "member@example.com"}])
 
-    result = api.get_team_members()
+    result = api.get_team_members(include_invites=True)
 
     member = next(item for item in result["members"] if item["type"] == "member")
     invite = next(item for item in result["members"] if item["type"] == "invite")
 
+    assert result["invites"] == 123
+    assert result["invites_loaded"] == 1
+    assert result["invites_truncated"] is True
     assert member["seat_type"] == "chatgpt"
     assert member["seat_type_raw"] == "default"
     assert member["seat_type_label"] == "ChatGPT"
@@ -54,30 +59,85 @@ def test_get_team_members_includes_seat_type_fields(monkeypatch):
     assert invite["seat_type_label"] == "Codex"
 
 
+def test_get_team_members_skips_invite_count_and_details_by_default(monkeypatch):
+    _setup_team_member_api(monkeypatch)
+    invite_count_calls = []
+    invite_detail_calls = []
+
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback(object()))
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_members",
+        lambda _chatgpt, account_id=None: [{"email": "member@example.com", "id": "user-1"}],
+    )
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_invite_count",
+        lambda *_args, **_kwargs: invite_count_calls.append(True) or 888,
+    )
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_invites",
+        lambda *_args, **_kwargs: invite_detail_calls.append(True) or [],
+    )
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
+
+    result = api.get_team_members()
+
+    assert result["invites"] is None
+    assert result["invites_counted"] is False
+    assert result["invites_loaded"] == 0
+    assert result["invites_included"] is False
+    assert [item["type"] for item in result["members"]] == ["member"]
+    assert invite_count_calls == []
+    assert invite_detail_calls == []
+
+
+def test_get_team_members_counts_invites_on_request_without_loading_details(monkeypatch):
+    _setup_team_member_api(monkeypatch)
+    invite_detail_calls = []
+
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback(object()))
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_members",
+        lambda _chatgpt, account_id=None: [{"email": "member@example.com", "id": "user-1"}],
+    )
+    monkeypatch.setattr("autoteam.account_ops.fetch_team_invite_count", lambda _chatgpt, account_id=None: 888)
+    monkeypatch.setattr(
+        "autoteam.account_ops.fetch_team_invites",
+        lambda *_args, **_kwargs: invite_detail_calls.append(True) or [],
+    )
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
+
+    result = api.get_team_members(include_invite_count=True)
+
+    assert result["invites"] == 888
+    assert result["invites_counted"] is True
+    assert result["invites_loaded"] == 0
+    assert result["invites_included"] is False
+    assert [item["type"] for item in result["members"]] == ["member"]
+    assert invite_detail_calls == []
+
+
 def test_get_team_members_marks_managed_cpa_auth_email_as_local(monkeypatch):
     _setup_team_member_api(monkeypatch)
 
     monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback(object()))
     monkeypatch.setattr(
-        "autoteam.account_ops.fetch_team_state",
-        lambda _chatgpt: (
-            [
-                {
-                    "email": "managed@example.com",
-                    "role": "standard-user",
-                    "id": "user-1",
-                    "seat_type": "usage_based",
-                },
-                {
-                    "email": "external@example.com",
-                    "role": "standard-user",
-                    "id": "user-2",
-                    "seat_type": "usage_based",
-                },
-            ],
-            [],
-        ),
+        "autoteam.account_ops.fetch_team_members",
+        lambda _chatgpt, account_id=None: [
+            {
+                "email": "managed@example.com",
+                "role": "standard-user",
+                "id": "user-1",
+                "seat_type": "usage_based",
+            },
+            {
+                "email": "external@example.com",
+                "role": "standard-user",
+                "id": "user-2",
+                "seat_type": "usage_based",
+            },
+        ],
     )
+    monkeypatch.setattr("autoteam.account_ops.fetch_team_invite_count", lambda _chatgpt, account_id=None: 0)
     monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
     monkeypatch.setattr("autoteam.cpa_sync.get_managed_cpa_auth_names", lambda: {"managed.json"})
     monkeypatch.setattr(

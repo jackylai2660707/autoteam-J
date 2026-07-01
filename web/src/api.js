@@ -108,6 +108,15 @@ export const api = {
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
   setAutoCheckConfig: (cfg) => request('PUT', '/config/auto-check', cfg),
 
-  getTeamMembers: (accountId = '') => request('GET', `/team/members${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`),
+  getTeamMembers: (accountId = '', options = {}) => {
+    const params = new URLSearchParams()
+    if (accountId) params.set('account_id', accountId)
+    if (options.includeInvites) params.set('include_invites', 'true')
+    if (options.includeInviteCount === true) params.set('include_invite_count', 'true')
+    if (options.includeInviteCount === false) params.set('include_invite_count', 'false')
+    if (options.inviteLimit) params.set('invite_limit', String(options.inviteLimit))
+    const query = params.toString()
+    return request('GET', `/team/members${query ? `?${query}` : ''}`)
+  },
   getLogs: (limit = 100, since = 0) => request('GET', `/logs?limit=${limit}&since=${since}`),
 }

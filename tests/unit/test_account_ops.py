@@ -66,6 +66,39 @@ def test_fetch_team_state_parses_har_items_and_paginates_invites(monkeypatch):
     ]
 
 
+def test_fetch_team_invite_count_reads_only_first_page(monkeypatch):
+    monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
+    calls = []
+
+    class _CountChatGPT:
+        def _api_fetch(self, method, path):
+            calls.append(path)
+            return {
+                "status": 200,
+                "body": '{"items":[{"email_address":"first@example.com"}],"total":888,"limit":1,"offset":0}',
+            }
+
+    assert account_ops.fetch_team_invite_count(_CountChatGPT()) == 888
+    assert calls == ["/backend-api/accounts/acc-1/invites?offset=0&limit=1&query="]
+
+
+def test_fetch_team_invites_can_limit_loaded_items(monkeypatch):
+    monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
+    chatgpt = _FakeChatGPT(
+        {
+            "/backend-api/accounts/acc-1/invites?offset=0&limit=25&query=": {
+                "status": 200,
+                "body": (
+                    '{"items":[{"email_address":"first@example.com"}],'
+                    '"total":2,"limit":1,"offset":0}'
+                ),
+            },
+        }
+    )
+
+    assert account_ops.fetch_team_invites(chatgpt, max_items=1) == [{"email_address": "first@example.com"}]
+
+
 def test_fetch_team_state_raises_readable_error_when_users_response_is_html(monkeypatch):
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(

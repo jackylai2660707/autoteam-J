@@ -37,7 +37,12 @@
           <span class="text-white font-medium">{{ currentTeamLabel }}</span>
         </span>
         <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">成员: <span class="text-white font-medium">{{ data.total }}</span></span>
-        <span v-if="data.invites > 0" class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">待接受邀请: <span class="text-yellow-400 font-medium">{{ data.invites }}</span></span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">
+          待接受邀请:
+          <span v-if="data.invites_counted" class="text-yellow-400 font-medium">{{ data.invites }}</span>
+          <span v-else class="text-gray-500">未加载</span>
+          <span v-if="data.invites_included" class="ml-1 text-gray-500">已载入 {{ data.invites_loaded || 0 }}</span>
+        </span>
         <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">受管 OAuth active: <span class="text-emerald-400 font-medium">{{ memberOAuthSummary.active }}</span></span>
         <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">受管 quota 可用: <span class="text-emerald-400 font-medium">{{ memberQuotaSummary.available }}</span></span>
         <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">受管 quota 耗尽记录: <span class="text-amber-400 font-medium">{{ memberQuotaSummary.exhausted }}</span></span>
@@ -46,6 +51,47 @@
       <div class="px-4 py-3 rounded-lg text-sm bg-blue-500/10 text-blue-300 border border-blue-500/20">
         当前已按 <code class="px-1 rounded bg-gray-900/70">swap_seat</code> 模式展示：不会移出成员，也不会取消邀请。
         成员行只合并 AutoTeam 受管 CPA OAuth 与受管 quota 记录；外部 auth / 非受管成员只保护，不使用、不启停、不删除。
+      </div>
+      <div
+        v-if="!data.invites_counted || data.invites > 0"
+        class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+      >
+        <span v-if="!data.invites_counted">
+          为了避免大量 pending invite 拖慢页面，当前只加载成员；可以单独刷新 pending 数量，或按需载入少量详情。
+        </span>
+        <span v-else-if="!data.invites_included">
+          已检测到 {{ data.invites }} 个 pending invite。为避免 800+ invite 拖慢页面，默认只加载成员；需要逐个操作时再按需载入。
+        </span>
+        <span v-else-if="data.invites_truncated">
+          已载入前 {{ data.invites_loaded }} / {{ data.invites }} 个 pending invite。批量清理请用「清空 pending invite」任务，不需要在这里全量展开。
+        </span>
+        <span v-else>
+          pending invite 已载入，可在表格中选择单个 invite 消费。
+        </span>
+        <button
+          v-if="!data.invites_counted"
+          @click="loadPendingInviteCount"
+          :disabled="loading"
+          class="rounded-lg border border-gray-600 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition hover:bg-gray-700 disabled:opacity-50"
+        >
+          {{ loading ? '刷新中...' : '刷新 pending 数量' }}
+        </button>
+        <button
+          v-else-if="!data.invites_included && data.invites > 0"
+          @click="loadPendingInvites"
+          :disabled="loading"
+          class="rounded-lg border border-amber-500/40 bg-amber-600/20 px-3 py-1 text-xs font-medium text-amber-100 transition hover:bg-amber-600/30 disabled:opacity-50"
+        >
+          {{ loading ? '加载中...' : `载入前 ${inviteDetailLimit} 个 pending invite` }}
+        </button>
+        <button
+          v-else-if="data.invites_included"
+          @click="hidePendingInvites"
+          :disabled="loading"
+          class="rounded-lg border border-gray-600 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition hover:bg-gray-700 disabled:opacity-50"
+        >
+          隐藏 pending invite 行
+        </button>
       </div>
       <div
         v-if="selectedTeam"
@@ -203,6 +249,7 @@ const cpaAuths = ref([])
 const cpaFilesSummary = ref({})
 const teamSelectorReady = ref(false)
 const consumeTargetActive = ref(2)
+const inviteDetailLimit = 100
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const enabledTeams = computed(() => teams.value.filter(team => team.enabled !== false))
 const selectedTeam = computed(() => teams.value.find(team => team.account_id === selectedAccountId.value) || enabledTeams.value[0] || teams.value[0] || null)
@@ -238,7 +285,7 @@ function loadCache() {
       const cached = JSON.parse(raw)
       // 缓存 10 分钟有效
       if (cached.time && Date.now() - cached.time < 600000) {
-        return cached.data
+        return slimMemberPayload(cached.data)
       }
     }
   } catch {}
@@ -247,8 +294,21 @@ function loadCache() {
 
 function saveCache(d) {
   try {
-    localStorage.setItem(cacheKey(), JSON.stringify({ data: d, time: Date.now() }))
+    localStorage.setItem(cacheKey(), JSON.stringify({ data: slimMemberPayload(d), time: Date.now() }))
   } catch {}
+}
+
+function slimMemberPayload(payload) {
+  if (!payload) return payload
+  const members = Array.isArray(payload.members) ? payload.members.filter(item => item.type !== 'invite') : []
+  return {
+    ...payload,
+    members,
+    invites_included: false,
+    invites_loaded: 0,
+    invites_truncated: false,
+    invites_counted: !!payload.invites_counted,
+  }
 }
 
 function memberKey(member) {
@@ -335,12 +395,18 @@ function syncConsumeTargetActive() {
   consumeTargetActive.value = Math.max(1, Math.min(5, Number(selectedTeam.value?.max_chatgpt_active) || 2))
 }
 
-async function fetchMembers() {
+async function fetchMembers(options = {}) {
+  const includeInvites = !!options.includeInvites
+  const includeInviteCount = options.includeInviteCount ?? includeInvites
   loading.value = true
   error.value = ''
   try {
     const [membersResult, runtimeResult, cpaResult] = await Promise.all([
-      api.getTeamMembers(selectedAccountId.value),
+      api.getTeamMembers(selectedAccountId.value, {
+        includeInvites,
+        includeInviteCount,
+        inviteLimit: inviteDetailLimit,
+      }),
       api.getSwapRuntimeStatus().catch(() => null),
       api.getCpaFiles().catch(() => []),
     ])
@@ -348,12 +414,24 @@ async function fetchMembers() {
     runtimeStatus.value = runtimeResult
     cpaAuths.value = Array.isArray(cpaResult) ? cpaResult : Array.isArray(cpaResult?.files) ? cpaResult.files : []
     cpaFilesSummary.value = cpaResult?.summary || {}
-    saveCache(data.value)
+    if (!includeInvites) saveCache(data.value)
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
   }
+}
+
+async function loadPendingInvites() {
+  await fetchMembers({ includeInvites: true, includeInviteCount: true })
+}
+
+async function loadPendingInviteCount() {
+  await fetchMembers({ includeInvites: false, includeInviteCount: true })
+}
+
+async function hidePendingInvites() {
+  await fetchMembers({ includeInvites: false })
 }
 
 async function loadTeams() {
