@@ -373,15 +373,14 @@ class CloudflareTempEmailClient:
         if not isinstance(results, list):
             return []
 
-        resolved_account_id = account_id or self._resolve_account_id_for_email(target_email)
         normalized = [self._normalize_email_item(item) for item in results]
-        if resolved_account_id is None:
+        if account_id is None:
             return normalized
 
         filtered = []
         for item in normalized:
             candidate_id = item.get("accountId")
-            if candidate_id is not None and str(candidate_id) != str(resolved_account_id):
+            if candidate_id is not None and str(candidate_id) != str(account_id):
                 continue
             filtered.append(item)
         return filtered

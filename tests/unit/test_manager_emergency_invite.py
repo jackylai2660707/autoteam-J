@@ -90,6 +90,18 @@ class _RecordingMail(_FakeCfMail):
         return {"sendEmail": "noreply@openai.com", "subject": "Invite", "body": "invite"}
 
 
+class _IcloudMail(_RecordingMail):
+    service_id = "icloud-hme"
+
+    def __init__(self):
+        super().__init__()
+        self.login_calls = 0
+
+    def login(self):
+        self.login_calls += 1
+        return "ok"
+
+
 class _RetryCfMail(_FakeCfMail):
     def _resolve_account_id_for_email(self, email):
         if email == "retry@example.com":
@@ -168,6 +180,36 @@ def test_forwarded_recipient_mail_client_filters_to_original_recipient(monkeypat
 
     assert [item["subject"] for item in base_emails] == ["base code"]
     assert [item["subject"] for item in plus_emails] == ["plus alias code"]
+
+
+def test_direct_mail_service_takes_precedence_over_pending_forward_map(monkeypatch):
+    monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "icloud.com=jackylai@latte-fitness.com")
+    monkeypatch.setenv(
+        "MAIL_SERVICES_JSON",
+        '[{"id":"icloud-hme","type":"cloudflare_temp_email","base_url":"https://icloud.example","admin_password":"secret","domain":"icloud.com"}]',
+    )
+    base = _RecordingMail()
+
+    wrapped = manager._with_pending_invite_forwarding(base)
+    wrapped.search_emails_by_recipient("sips.bonier.5d@icloud.com", size=7)
+
+    assert manager._pending_invite_forward_to("sips.bonier.5d@icloud.com") == ""
+    assert base.search_calls == [("sips.bonier.5d@icloud.com", 7, None)]
+
+
+def test_pending_invite_mail_client_uses_domain_matched_service(monkeypatch):
+    selected = _IcloudMail()
+    monkeypatch.setenv(
+        "MAIL_SERVICES_JSON",
+        '[{"id":"default-cf","type":"cloudflare_temp_email","base_url":"https://cf.example","admin_password":"secret","domain":"example.com"},'
+        '{"id":"icloud-hme","type":"cloudflare_temp_email","base_url":"https://icloud.example","admin_password":"secret","domain":"icloud.com"}]',
+    )
+    monkeypatch.setattr(manager, "get_mail_client_for_account", lambda _acc: selected)
+
+    client = manager._mail_client_for_pending_invite(_FakeCfMail(), "sips.bonier.5d@icloud.com")
+
+    assert getattr(client, "service_id", "") == "icloud-hme"
+    assert selected.login_calls == 1
 
 
 def test_pending_invite_candidates_allow_mapped_non_cfmail_domain(monkeypatch):

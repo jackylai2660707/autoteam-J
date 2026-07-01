@@ -278,6 +278,8 @@ def _pending_invite_forward_to(email: str | None, acc: dict | None = None) -> st
     target = _normalized_email(email)
     if not target:
         return ""
+    if infer_mail_service_from_email(target):
+        return ""
     mapping = _parse_pending_invite_forward_map()
     domain = _email_domain(target)
     return mapping.get(target) or mapping.get(domain) or ""
@@ -312,6 +314,8 @@ class _ForwardedRecipientMailClient:
         explicit = _normalized_email((acc or {}).get("mail_forward_to") or (acc or {}).get("forward_to"))
         if explicit:
             return explicit
+        if infer_mail_service_from_email(target):
+            return target
         domain = _email_domain(target)
         return self._mapping.get(target) or self._mapping.get(domain) or target
 
@@ -445,6 +449,26 @@ def _with_pending_invite_forwarding(mail_client, acc: dict | None = None):
     if isinstance(mail_client, _ForwardedRecipientMailClient):
         return mail_client
     return _ForwardedRecipientMailClient(mail_client, mapping=mapping)
+
+
+def _mail_client_for_pending_invite(default_client, email: str):
+    """Use a domain-matched mail service for pending invite reads when configured."""
+    target = _normalized_email(email)
+    service_id = infer_mail_service_from_email(target)
+    default_service_id = str(getattr(default_client, "service_id", "") or "")
+    if not service_id or service_id == default_service_id:
+        return _with_pending_invite_forwarding(default_client, acc={"email": target})
+
+    acc = {"email": target, "mail_service_id": service_id}
+    mail_client = get_mail_client_for_account(acc)
+    if getattr(mail_client, "provider_name", "") != MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
+        raise RuntimeError(f"pending invite 邮箱服务不支持注册收信: {target}")
+    try:
+        mail_client.login()
+    except Exception:
+        logger.debug("[注册新号] pending invite 邮箱服务登录失败: %s", target, exc_info=True)
+        raise
+    return _with_pending_invite_forwarding(mail_client, acc=acc)
 
 
 def _parse_email_list(value) -> tuple[list[str], list[str]]:
@@ -3303,10 +3327,11 @@ def create_new_account(
         _abort_if_cancel_requested()
         email = candidate["email"]
         password = f"Tmp_{uuid.uuid4().hex[:12]}!"
+        candidate_mail_client = _mail_client_for_pending_invite(mail_client, email)
         mail_account_id = _ensure_local_pending_invite_account(
             email,
             password,
-            mail_client,
+            candidate_mail_client,
             team_context=team_context,
             team_account_id=team_account_id,
         )
@@ -3319,7 +3344,7 @@ def create_new_account(
         _mark_pending_invite_attempt_started(email)
 
         try:
-            invite_link = _extract_pending_invite_link(mail_client, email)
+            invite_link = _extract_pending_invite_link(candidate_mail_client, email)
         except TimeoutError:
             _mark_pending_invite_attempt_finished(email, "invite_mail_missing")
             update_account(
@@ -3347,7 +3372,7 @@ def create_new_account(
         # 避免 ChatGPT Team API 浏览器和注册浏览器互相干扰。
         if _chatgpt_session_ready(chatgpt_api):
             chatgpt_api.stop()
-        result = _complete_registration(email, password, invite_link, mail_client, team_context=team_context)
+        result = _complete_registration(email, password, invite_link, candidate_mail_client, team_context=team_context)
         if result:
             _mark_pending_invite_attempt_finished(email)
             return result
@@ -3384,10 +3409,11 @@ def create_new_invited_account(
         acc = candidate.get("account") or {}
         email = candidate["email"]
         password = str(acc.get("password") or "") or f"Tmp_{uuid.uuid4().hex[:12]}!"
+        candidate_mail_client = _mail_client_for_pending_invite(mail_client, email)
         mail_account_id = _ensure_local_pending_invite_account(
             email,
             password,
-            mail_client,
+            candidate_mail_client,
             account_id=acc.get("mail_account_id") or None,
             team_context=team_context,
             team_account_id=team_account_id,
@@ -3400,7 +3426,7 @@ def create_new_invited_account(
             _team_label(team_context),
         )
         try:
-            invite_link = _extract_pending_invite_link(mail_client, email)
+            invite_link = _extract_pending_invite_link(candidate_mail_client, email)
         except TimeoutError:
             update_account(email, status=STATUS_PENDING, auth_last_error="invite_mail_missing")
             logger.warning("[新增 invite] 已有 pending invite 邮件缺失/超时: %s", email)
@@ -3416,7 +3442,7 @@ def create_new_invited_account(
 
         if _chatgpt_session_ready(chatgpt_api):
             chatgpt_api.stop()
-        return _complete_registration(email, password, invite_link, mail_client, team_context=team_context)
+        return _complete_registration(email, password, invite_link, candidate_mail_client, team_context=team_context)
 
     effective_invite_domains = str(invite_domains or getattr(team_context, "invite_domains", "") or "").strip()
     mail_account_id, email, prefix = _create_random_cfmail_address(
