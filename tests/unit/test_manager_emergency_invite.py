@@ -182,7 +182,7 @@ def test_forwarded_recipient_mail_client_filters_to_original_recipient(monkeypat
     assert [item["subject"] for item in plus_emails] == ["plus alias code"]
 
 
-def test_direct_mail_service_takes_precedence_over_pending_forward_map(monkeypatch):
+def test_forward_map_still_applies_when_base_client_is_not_direct_service(monkeypatch):
     monkeypatch.setenv("PENDING_INVITE_FORWARD_MAP", "icloud.com=jackylai@latte-fitness.com")
     monkeypatch.setenv(
         "MAIL_SERVICES_JSON",
@@ -193,8 +193,8 @@ def test_direct_mail_service_takes_precedence_over_pending_forward_map(monkeypat
     wrapped = manager._with_pending_invite_forwarding(base)
     wrapped.search_emails_by_recipient("sips.bonier.5d@icloud.com", size=7)
 
-    assert manager._pending_invite_forward_to("sips.bonier.5d@icloud.com") == ""
-    assert base.search_calls == [("sips.bonier.5d@icloud.com", 7, None)]
+    assert manager._pending_invite_forward_to("sips.bonier.5d@icloud.com") == "jackylai@latte-fitness.com"
+    assert base.search_calls == [("jackylai@latte-fitness.com", 50, "addr-forward")]
 
 
 def test_pending_invite_mail_client_uses_domain_matched_service(monkeypatch):

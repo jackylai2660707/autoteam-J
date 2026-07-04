@@ -278,8 +278,6 @@ def _pending_invite_forward_to(email: str | None, acc: dict | None = None) -> st
     target = _normalized_email(email)
     if not target:
         return ""
-    if infer_mail_service_from_email(target):
-        return ""
     mapping = _parse_pending_invite_forward_map()
     domain = _email_domain(target)
     return mapping.get(target) or mapping.get(domain) or ""
@@ -314,7 +312,7 @@ class _ForwardedRecipientMailClient:
         explicit = _normalized_email((acc or {}).get("mail_forward_to") or (acc or {}).get("forward_to"))
         if explicit:
             return explicit
-        if infer_mail_service_from_email(target):
+        if infer_mail_service_from_email(target) == str(getattr(self._base_client, "service_id", "") or ""):
             return target
         domain = _email_domain(target)
         return self._mapping.get(target) or self._mapping.get(domain) or target
